@@ -31,8 +31,9 @@ console = Console()
 class AgentLoop:
     """Run one user request through the async agent loop.
 
-    Accepts a single Settings object (mirrors OpenHarness's pattern where the
-    runtime passes a resolved config bundle to the engine).
+    Owns the conversation history so multiple prompts can share context
+    across calls — the foundation for interactive multi-turn sessions.
+    Mirrors OpenHarness's QueryEngine which owns ``_messages`` the same way.
     """
 
     def __init__(self, *, cwd: Path, settings: Settings) -> None:
@@ -48,17 +49,24 @@ class AgentLoop:
         self.permissions = PermissionChecker(cwd=cwd)
         self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
 
+        # The conversation lives on the AgentLoop so it survives across
+        # multiple run() calls.  This is the key refactor for step 1a.
+        self.conversation = Conversation()
+        self.conversation.append(Message(role="system", content=SYSTEM_PROMPT))
+
     async def run(self, prompt: str) -> str:
-        """Run the async loop and return the final assistant text."""
-        conversation = Conversation()
-        conversation.append(Message(role="system", content=SYSTEM_PROMPT))
-        conversation.append(Message(role="user", content=prompt))
+        """Run one turn of the agent loop and return the final assistant text.
+
+        Appends the user message to the existing conversation, so history
+        from previous calls is preserved automatically.
+        """
+        self.conversation.append(Message(role="user", content=prompt))
 
         for turn in range(1, self.settings.max_turns + 1):
             response_message = None
 
             async for event in self.llm.stream(
-                messages=conversation.to_openai(),
+                messages=self.conversation.to_openai(),
                 tools=self.tools.to_openai_tools(),
             ):
                 if isinstance(event, TextDelta):
@@ -70,11 +78,11 @@ class AgentLoop:
             if response_message is None:
                 return "No response from model."
 
-            conversation.append(response_message)
+            self.conversation.append(response_message)
 
             if response_message.tool_calls:
                 console.print()
-                await self._execute_tools(response_message.tool_calls, conversation)
+                await self._execute_tools(response_message.tool_calls)
                 continue
 
             console.print()
@@ -82,11 +90,15 @@ class AgentLoop:
 
         return "Reached maximum turns without a final answer."
 
-    async def _execute_tools(
-        self,
-        tool_calls: list[dict],
-        conversation: Conversation,
-    ) -> None:
+    def clear(self) -> None:
+        """Reset the conversation, keeping only the system prompt.
+
+        Mirrors OpenHarness's QueryEngine.clear().
+        """
+        self.conversation = Conversation()
+        self.conversation.append(Message(role="system", content=SYSTEM_PROMPT))
+
+    async def _execute_tools(self, tool_calls: list[dict]) -> None:
         """Execute each tool call and append results to the conversation."""
         for tool_call in tool_calls:
             tool_name = tool_call["function"]["name"]
@@ -96,7 +108,7 @@ class AgentLoop:
             try:
                 arguments = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError:
-                conversation.append(
+                self.conversation.append(
                     Message(
                         role="tool",
                         content=f"Invalid JSON arguments: {raw_args}",
@@ -119,7 +131,7 @@ class AgentLoop:
                     else f"  [dim]← {preview}[/dim]"
                 )
 
-            conversation.append(
+            self.conversation.append(
                 Message(
                     role="tool",
                     content=result.output,

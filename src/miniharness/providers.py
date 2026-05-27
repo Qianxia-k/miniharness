@@ -43,7 +43,7 @@ PROFILES: dict[str, ProviderProfile] = {
         provider="dashscope",
         api_format="openai",
         api_key_env="DASHSCOPE_API_KEY",
-        default_model="qwen3-32b",
+        default_model="qwen3.5-397b-a17b",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         extra_body={"enable_thinking": False},
     ),

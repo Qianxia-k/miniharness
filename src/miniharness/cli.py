@@ -41,12 +41,7 @@ def main(
     sandbox: bool | None = typer.Option(None, "--sandbox/--no-sandbox", help="Enable/disable Docker sandbox"),
     sandbox_image: str | None = typer.Option(None, "--sandbox-image", help="Docker image for sandbox"),
 ) -> None:
-    """Run a single MiniHarness prompt."""
-    if prompt is None:
-        console.print("[bold]MiniHarness[/bold]")
-        console.print("Usage: uv run mh \"summarize this project\"")
-        raise typer.Exit(0)
-
+    """Run a MiniHarness prompt, or start interactive REPL if no prompt given."""
     root = Path(cwd).expanduser().resolve()
 
     # ---- build settings -------------------------------------------------
@@ -62,10 +57,15 @@ def main(
     )
 
     if dry_run:
-        _print_dry_run(root, settings, prompt)
+        _print_dry_run(root, settings, prompt or "")
         raise typer.Exit(0)
 
-    asyncio.run(_run(prompt=prompt, root=root, settings=settings))
+    if prompt is None:
+        # No prompt argument → interactive REPL mode
+        asyncio.run(_run_repl(root=root, settings=settings))
+    else:
+        # Prompt provided → single-shot mode (original behaviour)
+        asyncio.run(_run(prompt=prompt, root=root, settings=settings))
 
 
 def _print_dry_run(root: Path, settings: Settings, prompt: str) -> None:
@@ -100,3 +100,82 @@ async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
             from miniharness.sandbox import stop_sandbox
 
             await stop_sandbox()
+
+
+async def _run_repl(*, root: Path, settings: Settings) -> None:
+    """Interactive REPL: read prompts in a loop with persistent conversation.
+
+    Mirrors OpenHarness's handle_line() dispatch: lines starting with "/"
+    are treated as local commands; everything else is sent to the model.
+    """
+    loop = AgentLoop(cwd=root, settings=settings)
+
+    console.print("[bold]MiniHarness[/bold] — interactive mode")
+    console.print("Type [dim]/help[/dim] for commands, [dim]/exit[/dim] to quit.\n")
+
+    # Sandbox lifecycle for the whole session.
+    if settings.sandbox.enabled:
+        from miniharness.sandbox import start_sandbox
+
+        console.print(f"[dim]Starting sandbox (image={settings.sandbox.image})...[/dim]")
+        await start_sandbox(cwd=root, image=settings.sandbox.image)
+        console.print("[dim]Sandbox ready[/dim]\n")
+
+    try:
+        while True:
+            try:
+                line = console.input("[bold]▸[/bold] ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                break
+
+            if not line:
+                continue
+
+            if line.startswith("/"):
+                if _handle_repl_command(line, loop, settings):
+                    break
+            else:
+                await loop.run(line)
+                console.print()  # blank line between turns
+    finally:
+        if settings.sandbox.enabled:
+            from miniharness.sandbox import stop_sandbox
+
+            await stop_sandbox()
+
+
+def _handle_repl_command(line: str, loop: AgentLoop, settings: Settings) -> bool:
+    """Handle a slash command.  Returns True if the REPL should exit.
+
+    Mirrors OpenHarness's command dispatch in handle_line().
+    """
+    cmd, *rest = line.split(maxsplit=1)
+    cmd = cmd.lower()
+
+    if cmd in ("/exit", "/quit", "/q"):
+        console.print("Goodbye!")
+        return True
+
+    if cmd == "/clear":
+        loop.clear()
+        console.print("[dim]Conversation cleared.[/dim]")
+
+    elif cmd == "/help":
+        console.print("Commands:")
+        console.print("  [bold]/exit, /quit, /q[/bold]   Exit MiniHarness")
+        console.print("  [bold]/clear[/bold]             Clear conversation history")
+        console.print("  [bold]/history[/bold]           Show message count in conversation")
+        console.print("  [bold]/help[/bold]              Show this help")
+        console.print()
+        console.print("Anything else is sent to the model as a prompt.")
+
+    elif cmd == "/history":
+        count = len(loop.conversation.messages)
+        console.print(f"[dim]Conversation has {count} messages (including system prompt).[/dim]")
+
+    else:
+        console.print(f"[yellow]Unknown command: {cmd}[/yellow]")
+        console.print("[dim]Type /help for available commands.[/dim]")
+
+    return False
