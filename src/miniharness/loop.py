@@ -45,6 +45,9 @@ class AgentLoop:
         model = settings.provider.model or provider_profile.default_model
         base_url = settings.provider.base_url or provider_profile.base_url
 
+        self.model = model
+        self.session_id: str | None = None  # set by CLI/REPL for persistence
+        self.tag: str = ""  # human-readable tag, set by /tag command
         self.llm = LLMClient(profile=provider_profile, model=model, base_url=base_url)
         self.permissions = PermissionChecker(cwd=cwd)
         self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
@@ -89,6 +92,22 @@ class AgentLoop:
             return response_message.content or ""
 
         return "Reached maximum turns without a final answer."
+
+    def export_messages(self) -> list[dict]:
+        """Export all messages as JSON-serializable dicts.
+
+        Used by session persistence to save conversation history to disk.
+        """
+        return [msg.model_dump() for msg in self.conversation.messages]
+
+    def restore_messages(self, messages_data: list[dict]) -> None:
+        """Replace the entire conversation with previously-saved messages.
+
+        Mirrors OpenHarness's QueryEngine.load_messages().
+        """
+        self.conversation = Conversation()
+        for data in messages_data:
+            self.conversation.append(Message(**data))
 
     def clear(self) -> None:
         """Reset the conversation, keeping only the system prompt.

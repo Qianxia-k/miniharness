@@ -14,7 +14,11 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
-from miniharness.config.settings import ProviderSettings, SandboxSettings, Settings
+from miniharness.config.settings import (
+    ProviderSettings as ProviderSettings,
+    SandboxSettings as SandboxSettings,
+    Settings,
+)
 
 
 def load_settings() -> Settings:
