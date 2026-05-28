@@ -28,6 +28,19 @@ class SandboxSettings:
 
 
 @dataclass
+class AgentSettings:
+    """LLM sampling parameters.
+
+    All fields default to ``None``, meaning "use the provider's default".
+    Only set values are forwarded to the API.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+
+
+@dataclass
 class Settings:
     """Top-level settings bag passed through the whole agent lifecycle.
 
@@ -37,4 +50,5 @@ class Settings:
 
     provider: ProviderSettings = field(default_factory=ProviderSettings)
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
+    agent: AgentSettings = field(default_factory=AgentSettings)
     max_turns: int = 8

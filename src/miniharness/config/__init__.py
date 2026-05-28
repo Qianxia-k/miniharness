@@ -15,6 +15,7 @@ import os
 from dataclasses import replace
 
 from miniharness.config.settings import (
+    AgentSettings as AgentSettings,
     ProviderSettings as ProviderSettings,
     SandboxSettings as SandboxSettings,
     Settings,
@@ -47,6 +48,9 @@ def apply_cli_overrides(
     model: str | None = None,
     base_url: str | None = None,
     max_turns: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_tokens: int | None = None,
     sandbox: bool | None = None,
     sandbox_image: str | None = None,
 ) -> Settings:
@@ -63,6 +67,13 @@ def apply_cli_overrides(
         settings.provider = replace(settings.provider, base_url=base_url)
     if max_turns is not None:
         settings = replace(settings, max_turns=max_turns)
+    # LLM sampling params — write through the shared AgentSettings reference.
+    if temperature is not None:
+        settings.agent.temperature = temperature
+    if top_p is not None:
+        settings.agent.top_p = top_p
+    if max_tokens is not None:
+        settings.agent.max_tokens = max_tokens
     if sandbox is not None:
         settings.sandbox = replace(settings.sandbox, enabled=sandbox)
     if sandbox_image is not None:
@@ -90,6 +101,23 @@ def _apply_env_vars(settings: Settings) -> Settings:
     max_turns_str = os.environ.get("MINIHARNESS_MAX_TURNS", "")
     if max_turns_str.isdigit():
         settings = replace(settings, max_turns=int(max_turns_str))
+
+    # Agent — LLM sampling params
+    temp_str = os.environ.get("MINIHARNESS_TEMPERATURE", "")
+    if temp_str:
+        try:
+            settings.agent.temperature = float(temp_str)
+        except ValueError:
+            pass
+    top_p_str = os.environ.get("MINIHARNESS_TOP_P", "")
+    if top_p_str:
+        try:
+            settings.agent.top_p = float(top_p_str)
+        except ValueError:
+            pass
+    tokens_str = os.environ.get("MINIHARNESS_MAX_TOKENS", "")
+    if tokens_str.isdigit():
+        settings.agent.max_tokens = int(tokens_str)
 
     # Sandbox
     if os.environ.get("MINIHARNESS_SANDBOX_ENABLED", "").lower() in ("1", "true", "yes"):

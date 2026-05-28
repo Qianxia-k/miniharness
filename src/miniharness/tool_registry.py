@@ -12,7 +12,10 @@ from miniharness.permissions import PermissionChecker
 from miniharness.tools.base import BaseTool, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
+from miniharness.tools.ls import LsTool
 from miniharness.tools.read_file import ReadFileTool
+from miniharness.tools.task import TaskTool
+from miniharness.tools.web_fetch import WebFetchTool
 from miniharness.tools.write_file import WriteFileTool
 from miniharness.tools.edit_file import EditFileTool
 
@@ -45,10 +48,17 @@ class ToolRegistry:
 
 def create_default_registry(*, cwd: Path, permissions: PermissionChecker) -> ToolRegistry:
     registry = ToolRegistry()
+    # Read-only tools
     registry.register(ReadFileTool(cwd=cwd, permissions=permissions))
+    registry.register(LsTool(cwd=cwd, permissions=permissions))
     registry.register(GrepTool(cwd=cwd, permissions=permissions))
-    registry.register(BashTool(cwd=cwd, permissions=permissions))
+    # Write tools
     registry.register(WriteFileTool(cwd=cwd, permissions=permissions))
     registry.register(EditFileTool(cwd=cwd, permissions=permissions))
+    # Shell
+    registry.register(BashTool(cwd=cwd, permissions=permissions))
+    # External & meta
+    registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskTool(cwd=cwd, permissions=permissions))
     return registry
 

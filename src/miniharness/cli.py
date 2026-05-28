@@ -46,6 +46,9 @@ def main(
     base_url: str | None = typer.Option(None, "--base-url", help="Override auto-detected base URL"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show resolved settings and exit"),
     max_turns: int | None = typer.Option(None, "--max-turns", help="Maximum agent loop turns"),
+    temperature: float | None = typer.Option(None, "--temperature", help="LLM sampling temperature (0.0–2.0)"),
+    top_p: float | None = typer.Option(None, "--top-p", help="LLM nucleus sampling threshold (0.0–1.0)"),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Maximum output tokens"),
     sandbox: bool | None = typer.Option(None, "--sandbox/--no-sandbox", help="Enable/disable Docker sandbox"),
     sandbox_image: str | None = typer.Option(None, "--sandbox-image", help="Docker image for sandbox"),
     continue_session: bool = typer.Option(False, "--continue", "-c", help="Resume the most recent session"),
@@ -63,6 +66,9 @@ def main(
         model=model,
         base_url=base_url,
         max_turns=max_turns,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
         sandbox=sandbox,
         sandbox_image=sandbox_image,
     )
@@ -361,6 +367,9 @@ def _handle_repl_command(
         console.print("  [bold]/model [name][/bold]      Show or switch the model")
         console.print("  [bold]/turns [n][/bold]         Show or set max agent turns")
         console.print("  [bold]/permissions [mode][/bold] Show / cycle / set permission mode (default / accept-edits / bypass / plan)")
+        console.print("  [bold]/temperature [n][/bold]   Show or set LLM temperature")
+        console.print("  [bold]/top-p [n][/bold]         Show or set LLM top_p")
+        console.print("  [bold]/max-tokens [n][/bold]    Show or set max output tokens")
         console.print("  [bold]/sessions[/bold]          List saved sessions for this project")
         console.print("  [bold]/resume [id][/bold]       Resume a saved session (no arg = picker)")
         console.print("  [bold]/tag <name>[/bold]         Tag current session with a name")
@@ -385,6 +394,15 @@ def _handle_repl_command(
 
     elif cmd == "/permissions":
         _repl_permissions(arg, loop)
+
+    elif cmd == "/temperature":
+        _repl_temperature(arg, loop)
+
+    elif cmd == "/top-p":
+        _repl_top_p(arg, loop)
+
+    elif cmd == "/max-tokens":
+        _repl_max_tokens(arg, loop)
 
     elif cmd == "/resume":
         return False, False, _repl_resume(arg, loop)
@@ -530,3 +548,66 @@ def _repl_permissions(arg: str, loop: AgentLoop) -> None:
     console.print(
         f"[dim]Permission mode: [bold]{new_mode}[/bold] — {labels.get(new_mode, '')}[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# Runtime LLM param commands — /temperature, /top-p, /max-tokens
+# ---------------------------------------------------------------------------
+
+
+def _repl_temperature(arg: str, loop: AgentLoop) -> None:
+    """Handle /temperature [value] — show or set LLM temperature."""
+    if not arg:
+        val = loop.settings.agent.temperature
+        if val is None:
+            console.print("[dim]Temperature: [bold]unset[/bold] (using provider default)[/dim]")
+        else:
+            console.print(f"[dim]Temperature: [bold]{val}[/bold][/dim]")
+        return
+
+    try:
+        val = float(arg)
+    except ValueError:
+        console.print(f"[yellow]Invalid temperature '{arg}' — must be a number (0.0–2.0).[/yellow]")
+        return
+
+    loop.settings.agent.temperature = val
+    console.print(f"[dim]Temperature set to [bold]{val}[/bold][/dim]")
+
+
+def _repl_top_p(arg: str, loop: AgentLoop) -> None:
+    """Handle /top-p [value] — show or set nucleus sampling threshold."""
+    if not arg:
+        val = loop.settings.agent.top_p
+        if val is None:
+            console.print("[dim]Top-p: [bold]unset[/bold] (using provider default)[/dim]")
+        else:
+            console.print(f"[dim]Top-p: [bold]{val}[/bold][/dim]")
+        return
+
+    try:
+        val = float(arg)
+    except ValueError:
+        console.print(f"[yellow]Invalid top-p '{arg}' — must be a number (0.0–1.0).[/yellow]")
+        return
+
+    loop.settings.agent.top_p = val
+    console.print(f"[dim]Top-p set to [bold]{val}[/bold][/dim]")
+
+
+def _repl_max_tokens(arg: str, loop: AgentLoop) -> None:
+    """Handle /max-tokens [value] — show or set max output tokens."""
+    if not arg:
+        val = loop.settings.agent.max_tokens
+        if val is None:
+            console.print("[dim]Max tokens: [bold]unset[/bold] (using provider default)[/dim]")
+        else:
+            console.print(f"[dim]Max tokens: [bold]{val}[/bold][/dim]")
+        return
+
+    if not arg.isdigit() or int(arg) < 1:
+        console.print(f"[yellow]Invalid max tokens '{arg}' — must be a positive integer.[/yellow]")
+        return
+
+    loop.settings.agent.max_tokens = int(arg)
+    console.print(f"[dim]Max tokens set to [bold]{arg}[/bold][/dim]")

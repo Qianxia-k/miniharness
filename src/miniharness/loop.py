@@ -48,7 +48,12 @@ class AgentLoop:
         self.model = model
         self.session_id: str | None = None  # set by CLI/REPL for persistence
         self.tag: str = ""  # human-readable tag, set by /tag command
-        self.llm = LLMClient(profile=provider_profile, model=model, base_url=base_url)
+        self.llm = LLMClient(
+            profile=provider_profile,
+            model=model,
+            base_url=base_url,
+            agent_settings=settings.agent,
+        )
         self.permissions = PermissionChecker(cwd=cwd)
         self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
 

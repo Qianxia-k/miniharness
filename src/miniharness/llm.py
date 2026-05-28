@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from rich.console import Console
 
+from miniharness.config.settings import AgentSettings
 from miniharness.messages import Message
 from miniharness.providers import ProviderProfile
 
@@ -80,10 +81,13 @@ class LLMClient:
         profile: ProviderProfile,
         model: str,
         base_url: str | None = None,
+        agent_settings: AgentSettings | None = None,
     ) -> None:
         self.profile = profile
         self.model = model
         self.base_url = base_url or profile.base_url
+        # Shared mutable reference — runtime changes are visible immediately.
+        self.agent_settings = agent_settings or AgentSettings()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -108,6 +112,13 @@ class LLMClient:
             params["tools"] = tools
         if self.profile.extra_body:
             params["extra_body"] = dict(self.profile.extra_body)
+        # Forward LLM sampling params when explicitly set (None = use API default).
+        if self.agent_settings.temperature is not None:
+            params["temperature"] = self.agent_settings.temperature
+        if self.agent_settings.top_p is not None:
+            params["top_p"] = self.agent_settings.top_p
+        if self.agent_settings.max_tokens is not None:
+            params["max_tokens"] = self.agent_settings.max_tokens
         return params
 
     def _is_retryable(self, error: Exception) -> bool:
