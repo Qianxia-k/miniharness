@@ -109,6 +109,15 @@ class AgentLoop:
         for data in messages_data:
             self.conversation.append(Message(**data))
 
+    def set_model(self, model: str) -> None:
+        """Switch the model for subsequent turns.
+
+        Updates both the AgentLoop-level attribute (used by session
+        persistence) and the LLM client (used for API calls).
+        """
+        self.model = model
+        self.llm.model = model
+
     def clear(self) -> None:
         """Reset the conversation, keeping only the system prompt.
 

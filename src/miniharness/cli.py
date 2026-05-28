@@ -358,6 +358,9 @@ def _handle_repl_command(
         console.print("  [bold]/exit, /quit, /q[/bold]   Exit MiniHarness")
         console.print("  [bold]/clear[/bold]             Clear conversation history")
         console.print("  [bold]/history[/bold]           Show message count in conversation")
+        console.print("  [bold]/model [name][/bold]      Show or switch the model")
+        console.print("  [bold]/turns [n][/bold]         Show or set max agent turns")
+        console.print("  [bold]/permissions [mode][/bold] Show / cycle / set permission mode (default / accept-edits / bypass / plan)")
         console.print("  [bold]/sessions[/bold]          List saved sessions for this project")
         console.print("  [bold]/resume [id][/bold]       Resume a saved session (no arg = picker)")
         console.print("  [bold]/tag <name>[/bold]         Tag current session with a name")
@@ -373,6 +376,15 @@ def _handle_repl_command(
         sessions = list_sessions(str(loop.cwd))
         console.print("[dim]Saved sessions (newest first):[/dim]")
         _render_session_list(sessions, numbered=False, current_id=loop.session_id, show_header=True)
+
+    elif cmd == "/model":
+        _repl_model(arg, loop)
+
+    elif cmd == "/turns":
+        _repl_turns(arg, loop)
+
+    elif cmd == "/permissions":
+        _repl_permissions(arg, loop)
 
     elif cmd == "/resume":
         return False, False, _repl_resume(arg, loop)
@@ -445,3 +457,76 @@ def _repl_tag(arg: str, loop: AgentLoop) -> bool:
     else:
         console.print(f"[yellow]Could not tag session '{loop.session_id}'.[/yellow]")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Runtime setting commands — /model, /turns, /permissions
+# ---------------------------------------------------------------------------
+
+
+def _repl_model(arg: str, loop: AgentLoop) -> None:
+    """Handle /model [name] — show or switch the active model.
+
+    Without an argument, prints the current model.  With one, switches to
+    the given model name immediately.
+    """
+    if not arg:
+        console.print(f"[dim]Current model: [bold]{loop.model}[/bold][/dim]")
+        return
+
+    loop.set_model(arg)
+    console.print(f"[dim]Model switched to [bold]{arg}[/bold][/dim]")
+
+
+def _repl_turns(arg: str, loop: AgentLoop) -> None:
+    """Handle /turns [n] — show or set the maximum agent-loop turns.
+
+    Without an argument, prints the current value.
+    """
+    if not arg:
+        console.print(f"[dim]Max turns: [bold]{loop.settings.max_turns}[/bold][/dim]")
+        return
+
+    if not arg.isdigit() or int(arg) < 1:
+        console.print(f"[yellow]Invalid turn count '{arg}' — must be a positive integer.[/yellow]")
+        return
+
+    loop.settings.max_turns = int(arg)
+    console.print(f"[dim]Max turns set to [bold]{loop.settings.max_turns}[/bold][/dim]")
+
+
+def _repl_permissions(arg: str, loop: AgentLoop) -> None:
+    """Handle /permissions [mode] — show or set the permission mode.
+
+    Without an argument, cycles to the next mode.  With one, jumps directly
+    to the named mode (default / accept-edits / bypass / plan).
+    """
+    from miniharness.permissions import PermissionMode
+
+    labels: dict[str, str] = {
+        "default": "ask before write & shell",
+        "accept-edits": "auto-allow writes, ask before shell",
+        "bypass": "allow everything (no prompts)",
+        "plan": "read-only (deny all writes & shell)",
+    }
+
+    if not arg:
+        # Show current mode and available options
+        new_mode = loop.permissions.mode
+        console.print(f"\n[bold]Current permission mode:[/bold] [green]{new_mode}[/green] — {labels[new_mode]}")
+        console.print("\n[dim]Available modes:[/dim]")
+        for mode, desc in labels.items():
+            console.print(f"  [bold]/permissions {mode:<12}[/bold] | {desc}")
+        console.print()
+        return
+    else:
+        if arg not in labels:
+            valid = ", ".join(sorted(labels))
+            console.print(f"[yellow]Unknown mode '{arg}'. Valid modes: {valid}[/yellow]")
+            return
+        loop.permissions.mode = arg
+        new_mode = arg
+
+    console.print(
+        f"[dim]Permission mode: [bold]{new_mode}[/bold] — {labels.get(new_mode, '')}[/dim]"
+    )
