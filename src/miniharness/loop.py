@@ -13,7 +13,10 @@ from pathlib import Path
 from rich.console import Console
 
 from miniharness.config.settings import Settings
+from miniharness.context.budget import ContextBudget
+from miniharness.context.compactor import compact_messages
 from miniharness.llm import LLMClient, StreamComplete, TextDelta
+from miniharness.memory.core import CoreMemory
 from miniharness.messages import Conversation, Message
 from miniharness.permissions import PermissionChecker
 from miniharness.providers import get_profile
@@ -56,11 +59,17 @@ class AgentLoop:
         )
         self.permissions = PermissionChecker(cwd=cwd)
         self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
+        self.budget = ContextBudget.for_model(
+            model, ratio=settings.context_budget_ratio
+        )
+        self.core_memory = CoreMemory(cwd)
 
         # The conversation lives on the AgentLoop so it survives across
         # multiple run() calls.  This is the key refactor for step 1a.
         self.conversation = Conversation()
-        self.conversation.append(Message(role="system", content=SYSTEM_PROMPT))
+        self.conversation.append(
+            Message(role="system", content=self._build_system_prompt())
+        )
 
     async def run(self, prompt: str) -> str:
         """Run one turn of the agent loop and return the final assistant text.
@@ -70,6 +79,40 @@ class AgentLoop:
         """
         self.conversation.append(Message(role="user", content=prompt))
 
+        # ---- context budget check -------------------------------------------
+        msgs = self.conversation.to_openai()
+        if self.budget.is_over_budget(msgs):
+            console.print(
+                f"  [dim]Context budget {self.budget.usage_ratio(msgs):.0%} used, "
+                f"compacting...[/dim]"
+            )
+            msgs, stats = await compact_messages(
+                msgs,
+                budget=self.budget,
+                llm_stream=self.llm.stream,
+                keep_last_n_turns=self.settings.keep_last_n_turns,
+            )
+            # Replace the conversation with compacted messages.
+            self.conversation = Conversation()
+            for m in msgs:
+                self.conversation.append(Message(**m))
+
+            dropped = stats["original_count"] - stats["final_count"]
+            summary = stats.get("Compacted Summary")
+            summary_info = ""
+            if summary:
+                summary_info = f" summary={len(summary)} chars"
+            console.print(
+                f"  [dim]Compacted: {stats['original_count']} → "
+                f"{stats['final_count']} messages "
+                f"({dropped} dropped, "
+                f"stage1={stats['stage1_truncated']}, "
+                f"stage2={stats['stage2_summarised']}{summary_info})[/dim]"
+            )
+            # 新增：漂亮打印完整的总结内容（像大模型思考过程）
+            if summary:
+                console.print(f"  [bold cyan]📝 LLM 压缩总结：[/bold cyan]")
+                console.print(f"  [dim]{summary}[/dim]")  # 输出完整内容，不截断
         for turn in range(1, self.settings.max_turns + 1):
             response_message = None
 
@@ -114,22 +157,34 @@ class AgentLoop:
         for data in messages_data:
             self.conversation.append(Message(**data))
 
+    def _build_system_prompt(self) -> str:
+        """Assemble the full system prompt from the static part + core memory."""
+        core = self.core_memory.render_for_system_prompt()
+        if core:
+            return f"{SYSTEM_PROMPT}\n\n{core}"
+        return SYSTEM_PROMPT
+
     def set_model(self, model: str) -> None:
         """Switch the model for subsequent turns.
 
-        Updates both the AgentLoop-level attribute (used by session
-        persistence) and the LLM client (used for API calls).
+        Updates the AgentLoop-level attribute, LLM client, and context budget
+        so compaction thresholds stay accurate for the new model.
         """
         self.model = model
         self.llm.model = model
+        self.budget = ContextBudget.for_model(
+            model, ratio=self.settings.context_budget_ratio
+        )
 
     def clear(self) -> None:
-        """Reset the conversation, keeping only the system prompt.
+        """Reset the conversation, keeping only the system prompt + core memory.
 
         Mirrors OpenHarness's QueryEngine.clear().
         """
         self.conversation = Conversation()
-        self.conversation.append(Message(role="system", content=SYSTEM_PROMPT))
+        self.conversation.append(
+            Message(role="system", content=self._build_system_prompt())
+        )
 
     async def _execute_tools(self, tool_calls: list[dict]) -> None:
         """Execute each tool call and append results to the conversation."""
@@ -151,12 +206,15 @@ class AgentLoop:
                 continue
 
             console.print(
-                f"  [dim]→ {tool_name}({json.dumps(arguments)})[/dim]"
+                f"  [dim]→ {tool_name}({json.dumps(arguments, ensure_ascii=False)})[/dim]"
             )
 
             result = await self.tools.execute(tool_name, arguments)
             if result.is_error:
                 console.print(f"  [yellow]! {result.output[:120]}[/yellow]")
+            elif tool_name.startswith("memory_"):
+                # Memory writes — show the full result prominently.
+                console.print(f"  [bold cyan]memory[/bold cyan] {result.output}")
             else:
                 preview = result.output[:80].replace("\n", " ")
                 console.print(

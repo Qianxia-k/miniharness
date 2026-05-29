@@ -370,6 +370,7 @@ def _handle_repl_command(
         console.print("  [bold]/temperature [n][/bold]   Show or set LLM temperature")
         console.print("  [bold]/top-p [n][/bold]         Show or set LLM top_p")
         console.print("  [bold]/max-tokens [n][/bold]    Show or set max output tokens")
+        console.print("  [bold]/memory[/bold]            Show core memory (project context & preferences)")
         console.print("  [bold]/sessions[/bold]          List saved sessions for this project")
         console.print("  [bold]/resume [id][/bold]       Resume a saved session (no arg = picker)")
         console.print("  [bold]/tag <name>[/bold]         Tag current session with a name")
@@ -403,6 +404,9 @@ def _handle_repl_command(
 
     elif cmd == "/max-tokens":
         _repl_max_tokens(arg, loop)
+
+    elif cmd == "/memory":
+        _repl_memory(arg, loop)
 
     elif cmd == "/resume":
         return False, False, _repl_resume(arg, loop)
@@ -611,3 +615,56 @@ def _repl_max_tokens(arg: str, loop: AgentLoop) -> None:
 
     loop.settings.agent.max_tokens = int(arg)
     console.print(f"[dim]Max tokens set to [bold]{arg}[/bold][/dim]")
+
+
+# ---------------------------------------------------------------------------
+# /memory — Core Memory inspection
+# ---------------------------------------------------------------------------
+
+
+def _repl_memory(arg: str, loop: AgentLoop) -> None:
+    """Handle /memory — display core memory + recent semantic & episodic entries."""
+    from datetime import datetime
+
+    from miniharness.memory.episodic import EpisodicStore
+    from miniharness.memory.semantic import SemanticStore
+
+    cm = loop.core_memory
+
+    # ── Core Memory ──────────────────────────────────────────────────
+    console.print(f"[bold bright_blue]Core Memory[/]  ([dim]{cm.path}[/dim])\n")
+    console.print(cm.read(), markup=False)
+    console.print()
+
+    # ── Semantic Memory ──────────────────────────────────────────────
+    sem_store = SemanticStore(str(loop.cwd))
+    sem_entries = sem_store.list_all()[:5]
+    if sem_entries:
+        console.print(f"[bold bright_blue]Semantic Memory[/]  ([dim]{sem_store._path}[/dim], last 5)\n")
+        for entry in sem_entries:
+            tags = ", ".join(entry.get("tags", []))
+            tag_str = f"  [dim]({tags})[/dim]" if tags else ""
+            console.print(f"  • {entry['fact']}{tag_str}")
+        console.print()
+    else:
+        console.print(f"[dim bright_blue]Semantic Memory: (empty)[/]\n")
+
+    # ── Episodic Memory ──────────────────────────────────────────────
+    epi_store = EpisodicStore(str(loop.cwd))
+    epi_entries = epi_store.list_all()[:5]
+    if epi_entries:
+        console.print(f"[bold bright_blue]Episodic Memory[/]  ([dim]{epi_store._path}[/dim], last 5)\n")
+        for entry in epi_entries:
+            ts = datetime.fromtimestamp(entry.get("timestamp", 0)).strftime("%m-%d %H:%M")
+            console.print(f"  [bold]{entry['task']}[/bold]  [dim]{ts}[/dim]")
+            console.print(f"  {entry['summary']}")
+            outcome = entry.get("outcome", "")
+            if outcome:
+                console.print(f"  [dim]outcome: {outcome}[/dim]")
+            files = entry.get("files_touched", [])
+            if files:
+                console.print(f"  [dim]files: {', '.join(files)}[/dim]")
+        console.print()
+    else:
+        console.print(f"[dim bright_blue]Episodic Memory: (empty)[/]\n")
+

@@ -13,6 +13,11 @@ from miniharness.tools.base import BaseTool, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
 from miniharness.tools.ls import LsTool
+from miniharness.tools.memory_tool import (
+    MemoryAddTool,
+    MemoryLogTool,
+    MemorySearchTool,
+)
 from miniharness.tools.read_file import ReadFileTool
 from miniharness.tools.task import TaskTool
 from miniharness.tools.web_fetch import WebFetchTool
@@ -60,5 +65,9 @@ def create_default_registry(*, cwd: Path, permissions: PermissionChecker) -> Too
     # External & meta
     registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
     registry.register(TaskTool(cwd=cwd, permissions=permissions))
+    # Memory (agent-managed, always allowed)
+    registry.register(MemorySearchTool(cwd=cwd, permissions=permissions))
+    registry.register(MemoryAddTool(cwd=cwd, permissions=permissions))
+    registry.register(MemoryLogTool(cwd=cwd, permissions=permissions))
     return registry
 

@@ -23,6 +23,7 @@ class ProviderProfile:
     api_key_env: str
     default_model: str
     base_url: str | None = None
+    context_window: int = 131072
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     def resolve_api_key(self) -> str:
@@ -45,6 +46,7 @@ PROFILES: dict[str, ProviderProfile] = {
         api_key_env="DASHSCOPE_API_KEY",
         default_model="qwen3.5-397b-a17b",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        context_window=131072,  # 128K
         extra_body={"enable_thinking": False},
     ),
     "openai": ProviderProfile(
@@ -54,6 +56,7 @@ PROFILES: dict[str, ProviderProfile] = {
         api_format="openai",
         api_key_env="OPENAI_API_KEY",
         default_model="gpt-4.1-mini",
+        context_window=131072,  # 128K
     ),
     "openai-compatible": ProviderProfile(
         name="openai-compatible",
@@ -62,6 +65,7 @@ PROFILES: dict[str, ProviderProfile] = {
         api_format="openai",
         api_key_env="OPENAI_API_KEY",
         default_model="gpt-4.1-mini",
+        context_window=131072,  # 128K
     ),
 }
 

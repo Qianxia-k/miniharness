@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
 @dataclass
 class ProviderSettings:
     """Resolved provider configuration."""
@@ -52,3 +51,5 @@ class Settings:
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
     max_turns: int = 8
+    context_budget_ratio: float = 0.001  # trigger compaction at 80% context usage
+    keep_last_n_turns: int = 3  # when compacting, always keep the last N turns intact
