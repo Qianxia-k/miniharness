@@ -14,7 +14,8 @@ from rich.console import Console
 
 from miniharness.config.settings import Settings
 from miniharness.context.budget import ContextBudget
-from miniharness.context.compactor import compact_messages
+from miniharness.context.compiler import ContextCompiler
+from miniharness.context.working_set import WorkingSet
 from miniharness.llm import LLMClient, StreamComplete, TextDelta
 from miniharness.memory.core import CoreMemory
 from miniharness.messages import Conversation, Message
@@ -63,6 +64,14 @@ class AgentLoop:
             model, ratio=settings.context_budget_ratio
         )
         self.core_memory = CoreMemory(cwd)
+        self.working_set = WorkingSet(max_files=20)
+        self.compiler = ContextCompiler(
+            budget=self.budget,
+            core_memory=self.core_memory,
+            working_set=self.working_set,
+            llm_stream=self.llm.stream,
+            keep_last_n_turns=settings.keep_last_n_turns,
+        )
 
         # The conversation lives on the AgentLoop so it survives across
         # multiple run() calls.  This is the key refactor for step 1a.
@@ -79,46 +88,44 @@ class AgentLoop:
         """
         self.conversation.append(Message(role="user", content=prompt))
 
-        # ---- context budget check -------------------------------------------
-        msgs = self.conversation.to_openai()
-        if self.budget.is_over_budget(msgs):
-            console.print(
-                f"  [dim]Context budget {self.budget.usage_ratio(msgs):.0%} used, "
-                f"compacting...[/dim]"
-            )
-            msgs, stats = await compact_messages(
-                msgs,
-                budget=self.budget,
-                llm_stream=self.llm.stream,
-                keep_last_n_turns=self.settings.keep_last_n_turns,
-            )
-            # Replace the conversation with compacted messages.
+        # ---- context compilation (budget check + compaction + assembly) ----
+        tools_openai = self.tools.to_openai_tools()
+        packet = await self.compiler.compile(self.conversation, tools_openai)
+
+        # If compaction ran, replace the conversation with the compacted version
+        # and print diagnostics.
+        stats = packet.stats
+        if stats.get("compacted"):
             self.conversation = Conversation()
-            for m in msgs:
+            for m in packet.messages:
                 self.conversation.append(Message(**m))
 
-            dropped = stats["original_count"] - stats["final_count"]
-            summary = stats.get("Compacted Summary")
-            summary_info = ""
-            if summary:
-                summary_info = f" summary={len(summary)} chars"
+            dropped = stats.get("dropped", 0)
+            summary = stats.get("compacted_summary")
+            summary_info = f" summary={len(summary)} chars" if summary else ""
             console.print(
-                f"  [dim]Compacted: {stats['original_count']} → "
-                f"{stats['final_count']} messages "
-                f"({dropped} dropped, "
+                f"  [dim]Compacted: "
                 f"stage1={stats['stage1_truncated']}, "
-                f"stage2={stats['stage2_summarised']}{summary_info})[/dim]"
+                f"stage2={stats['stage2_summarised']} "
+                f"({dropped} dropped{summary_info}) "
+                f"budget={stats['budget_ratio']:.0%}[/dim]"
             )
-            # 新增：漂亮打印完整的总结内容（像大模型思考过程）
             if summary:
                 console.print(f"  [bold cyan]📝 LLM 压缩总结：[/bold cyan]")
-                console.print(f"  [dim]{summary}[/dim]")  # 输出完整内容，不截断
+                console.print(f"  [dim]{summary}[/dim]")
+
         for turn in range(1, self.settings.max_turns + 1):
             response_message = None
 
+            # Use compiled messages for the first turn; subsequent turns
+            # include newly appended assistant + tool messages.
+            turn_messages = (
+                packet.messages if turn == 1
+                else self.conversation.to_openai()
+            )
             async for event in self.llm.stream(
-                messages=self.conversation.to_openai(),
-                tools=self.tools.to_openai_tools(),
+                messages=turn_messages,
+                tools=packet.tools,
             ):
                 if isinstance(event, TextDelta):
                     console.print(event.text, end="")
@@ -175,6 +182,7 @@ class AgentLoop:
         self.budget = ContextBudget.for_model(
             model, ratio=self.settings.context_budget_ratio
         )
+        self.compiler.budget = self.budget
 
     def clear(self) -> None:
         """Reset the conversation, keeping only the system prompt + core memory.
@@ -222,6 +230,14 @@ class AgentLoop:
                     else f"  [dim]← {preview}[/dim]"
                 )
 
+            # ---- auto-track files in working set -------------------------
+            _track_files_in_working_set(
+                self.working_set,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=result,
+            )
+
             self.conversation.append(
                 Message(
                     role="tool",
@@ -229,3 +245,54 @@ class AgentLoop:
                     tool_call_id=tool_call_id,
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# Working-set auto-tracking
+# ---------------------------------------------------------------------------
+
+# (tool_name, argument_key, is_write?)
+_TRACK_RULES: list[tuple[str, str, bool]] = [
+    ("read_file",  "path", False),   # read → touch only
+    ("write_file", "path", True),    # write → touch + auto-protect (TTL)
+    ("edit_file",  "path", True),    # edit  → touch + auto-protect (TTL)
+    ("ls",         "path", False),   # dir listing → touch only
+    ("grep",       "root", False),   # search root → touch only
+]
+
+
+def _track_files_in_working_set(
+    ws: WorkingSet,
+    *,
+    tool_name: str,
+    arguments: dict,
+    result,  # ToolResult
+) -> None:
+    """Auto-track file paths touched by a tool call.
+
+    Reads populate size metadata from the result.
+    Writes auto-pin (the file is in-progress work).
+    """
+
+    # Find the matching rule.
+    rule = None
+    for r in _TRACK_RULES:
+        if r[0] == tool_name:
+            rule = r
+            break
+    if rule is None:
+        return
+
+    _, arg_key, is_write = rule
+    path = arguments.get(arg_key, "")
+    if not isinstance(path, str) or not path.strip():
+        return
+    path = path.strip()
+
+    # Estimate file size from tool result (read_file returns content).
+    estimated_size = 0
+    if tool_name == "read_file" and not result.is_error:
+        content = result.output or ""
+        estimated_size = len(content.encode("utf-8"))
+
+    ws.touch(path, is_write=is_write, size=estimated_size)
