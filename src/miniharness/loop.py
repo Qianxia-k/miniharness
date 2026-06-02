@@ -50,6 +50,7 @@ from pathlib import Path
 from miniharness.config.settings import Settings
 from miniharness.context.budget import ContextBudget
 from miniharness.context.carryover import (
+    build_compact_attachments,
     init_tool_metadata,
     record_tool_carryover,
     remember_user_goal,
@@ -90,7 +91,8 @@ from miniharness.messages import Conversation, Message
 from miniharness.permissions import PermissionChecker
 from miniharness.prompts.system import assemble_system_prompt
 from miniharness.providers import get_profile
-from miniharness.tool_registry import create_default_registry
+from miniharness.skills import SkillTool, load_skill_registry
+from miniharness.tool_registry import ToolRegistry, create_default_registry
 from miniharness.tools.offload import offload_if_needed
 
 
@@ -178,6 +180,15 @@ class AgentLoop:
         )
         self.permissions = PermissionChecker(cwd=cwd)
         self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
+
+        # ── Skills system ────────────────────────────────────────────
+        self.skill_registry = load_skill_registry(cwd=cwd)
+        self.tools.register(SkillTool(
+            cwd=cwd,
+            registry=self.skill_registry,
+            permissions=self.permissions,
+        ))
+
         self.budget = ContextBudget.for_model(
             model, ratio=settings.context_budget_ratio
         )
@@ -254,8 +265,9 @@ class AgentLoop:
         })
 
         tools_openai = self.tools.to_openai_tools()
+        attachments = build_compact_attachments(self.tool_metadata)
         packet = await self.compiler.compile(
-            self.conversation, tools_openai, metadata=self.tool_metadata
+            self.conversation, tools_openai, attachments=attachments,
         )
         if packet.stats.get("compacted"):
             self._replace_conversation(packet.messages)
@@ -305,8 +317,9 @@ class AgentLoop:
                     show_compact_event(CompactPhase.COMPACT_START, trigger="reactive")
 
                     msgs = self.conversation.to_openai()
+                    attachments = build_compact_attachments(self.tool_metadata)
                     msgs, cstats = await self.compiler.compact_if_needed(
-                        msgs, metadata=self.tool_metadata
+                        msgs, attachments=attachments,
                     )
                     if cstats.get("compacted"):
                         self._replace_conversation(msgs)
@@ -453,6 +466,7 @@ class AgentLoop:
             core_memory_text=core_text,
             user_query=user_query,
             tool_count=len(self.tools._tools),
+            skill_registry=self.skill_registry,
         )
 
     def _refresh_system_prompt(self, *, user_query: str = "") -> None:

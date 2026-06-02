@@ -374,6 +374,7 @@ def _handle_repl_command(
         console.print("  [bold]/sessions[/bold]          List saved sessions for this project")
         console.print("  [bold]/resume [id][/bold]       Resume a saved session (no arg = picker)")
         console.print("  [bold]/tag <name>[/bold]         Tag current session with a name")
+        console.print("  [bold]/skills[/bold]            List available skills in the registry")
         console.print("  [bold]/help[/bold]              Show this help")
         console.print()
         console.print("Anything else is sent to the model as a prompt.")
@@ -413,6 +414,9 @@ def _handle_repl_command(
 
     elif cmd == "/tag":
         return False, _repl_tag(arg, loop), loop
+    
+    elif cmd == "/skills":
+        return False, False, _repl_skills(arg,loop)
 
     else:
         console.print(f"[yellow]Unknown command: {cmd}[/yellow]")
@@ -420,6 +424,24 @@ def _handle_repl_command(
 
     return False, False, loop
 
+
+def _repl_skills(arg: str, loop: AgentLoop) -> AgentLoop:
+    """Handle /skills — list available skills in the registry."""
+    registry = loop.skill_registry
+    if registry is None:
+        console.print("[yellow]Skill registry not available.[/yellow]")
+        return loop
+
+    skills = registry.model_invocable_skills()
+    if not skills:
+        console.print("[dim]No model-invocable skills available.[/dim]")
+        return loop
+
+    console.print("[bold]Available Skills[/bold]:\n")
+    for skill in skills:
+        console.print(f"- [bold]{skill.name}[/bold]: {skill.description}")
+    console.print("\n[dim]Use /help for more commands.[/dim]")
+    return loop
 
 def _repl_resume(arg: str, loop: AgentLoop) -> AgentLoop:
     """Handle /resume [id] in REPL mode.

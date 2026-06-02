@@ -189,14 +189,17 @@ def assemble_system_prompt(
     core_memory_text: str = "",
     user_query: str = "",
     tool_count: int = 0,
+    skill_registry=None,  # SkillRegistry | None
 ) -> str:
     """Assemble the full system prompt for a turn.
 
     Sections (in order):
     1. Base instructions (the static SYSTEM_PROMPT)
     2. Environment info (OS, shell, date, cwd)
-    3. Core Memory (stable project context)
-    4. Relevant memories (on-demand, keyword-matched to query)
+    3. Tool availability hint
+    4. Available Skills (if any)
+    5. Core Memory (stable project context)
+    6. Relevant memories (on-demand, keyword-matched to query)
 
     Parameters
     ----------
@@ -230,6 +233,12 @@ def assemble_system_prompt(
             f"search, and execute code in the workspace."
         )
 
+    # 2b. Available Skills.
+    if skill_registry is not None:
+        skills_section = _build_skills_section(skill_registry)
+        if skills_section:
+            sections.append(skills_section)
+
     # 3. Core Memory (stable context, always injected).
     if core_memory_text:
         sections.append(core_memory_text)
@@ -244,3 +253,26 @@ def assemble_system_prompt(
             sections.append(memory_block)
 
     return "\n\n".join(sections)
+
+
+def _build_skills_section(registry) -> str | None:
+    """Build the 'Available Skills' block for the system prompt.
+
+    Only lists skills the model is allowed to load (model_invocable=True).
+    """
+    skills = registry.model_invocable_skills()
+    if not skills:
+        return None
+
+    lines = [
+        "# Available Skills",
+        "",
+        "You have a `skill` tool.  When a user request matches a skill "
+        "description below, invoke `skill(name=\"<name>\")` to load "
+        "detailed instructions before proceeding.",
+        "",
+    ]
+    for skill in skills:
+        lines.append(f"- **{skill.name}**: {skill.description}")
+
+    return "\n".join(lines)

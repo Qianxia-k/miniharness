@@ -32,6 +32,11 @@ State tracked
 ``recent_work_log``
     Execution checkpoints: every tool invocation leaves a breadcrumb.
     Feeds the ``work_log`` attachment.
+
+``invoked_skills``
+    Skill names the agent has loaded via the ``skill`` tool.
+    Feeds the ``invoked_skills`` compact attachment so the model
+    remembers which skills are active after compaction.
 """
 
 from __future__ import annotations
@@ -62,6 +67,7 @@ def init_tool_metadata() -> dict[str, Any]:
         "read_file_state": [],
         "recent_verified_work": [],
         "recent_work_log": [],
+        "invoked_skills": [],
     }
 
 
@@ -137,6 +143,8 @@ def record_tool_carryover(
         _carryover_grep(metadata, arguments, result_output)
     elif tool_name == "web_fetch" and not is_error:
         _carryover_web_fetch(metadata, arguments, result_output)
+    elif tool_name == "skill" and not is_error:
+        _carryover_skill(metadata, arguments)
     elif tool_name in ("memory_add", "memory_log", "memory_search"):
         pass  # memory tools are self-documenting
     elif tool_name == "task":
@@ -311,8 +319,142 @@ def get_recent_verified_work(metadata: dict[str, Any], limit: int = 8) -> list[s
     return rvw[:limit]
 
 
+def _carryover_skill(
+    metadata: dict[str, Any],
+    arguments: dict[str, Any],
+) -> None:
+    """Record a skill invocation."""
+    skill_name = str(arguments.get("name", "")).strip()
+    if not skill_name:
+        return
+    skills: list[str] = metadata.setdefault("invoked_skills", [])
+    if skill_name in skills:
+        skills.remove(skill_name)
+    skills.append(skill_name)
+    if len(skills) > 8:
+        metadata["invoked_skills"] = skills[-8:]
+
+    _remember_active_artifact(metadata, f"skill:{skill_name}")
+    _remember_verified_work(metadata, f"Loaded skill {skill_name}")
+
+
+def get_invoked_skills(metadata: dict[str, Any]) -> list[str]:
+    """Return the list of invoked skill names."""
+    return list(metadata.get("invoked_skills", []))
+
+
 def get_recent_work_log(metadata: dict[str, Any], limit: int = 8) -> list[str]:
     """Return recent work log entries, newest first."""
     wl = list(metadata.get("recent_work_log", []))
     wl.reverse()
     return wl[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Compact attachments — built from tool_metadata during compaction
+# ---------------------------------------------------------------------------
+
+
+def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build compact-attachment messages from *metadata*.
+
+    Each attachment is a ``role="user"`` message with ``[Compact attachment: ...]``
+    format.  These are injected into the post-compact message list so the
+    model retains structured state even after old messages are discarded.
+
+    This is the ONLY function outside ``carryover`` that reads tool_metadata —
+    and it lives here so all metadata I/O is in one file.
+    """
+    attachments: list[dict[str, Any]] = []
+    if not metadata:
+        return attachments
+
+    builders = [
+        _build_task_focus_attachment,
+        _build_recent_files_attachment,
+        _build_invoked_skills_attachment,
+        _build_verified_work_attachment,
+        _build_work_log_attachment,
+    ]
+    for builder in builders:
+        att = builder(metadata)
+        if att:
+            attachments.append(att)
+    return attachments
+
+
+def _render_attachment(*, kind: str, title: str, body: str) -> dict[str, Any]:
+    """Render a compact attachment as a user message dict."""
+    return {
+        "role": "user",
+        "content": f"[Compact attachment: {kind}] {title}\n{body}",
+    }
+
+
+def _build_task_focus_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    tf = get_task_focus(metadata)
+    goal = tf.get("goal", "")
+    recent_goals = tf.get("recent_goals", [])
+    artifacts = tf.get("active_artifacts", [])
+    verified = tf.get("verified_state", [])
+
+    if not goal and not artifacts and not verified:
+        return None
+
+    lines: list[str] = []
+    if goal:
+        lines.append(f"Goal: {goal}")
+    if recent_goals:
+        lines.append(f"Recent goals: {', '.join(recent_goals[-3:])}")
+    if artifacts:
+        lines.append(f"Active artifacts: {', '.join(artifacts[-5:])}")
+    if verified:
+        lines.append(f"Verified: {', '.join(verified[-4:])}")
+    if not lines:
+        return None
+
+    return _render_attachment(kind="task_focus", title="Current Task & Progress", body="\n".join(lines))
+
+
+def _build_recent_files_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    state = get_read_file_state(metadata)[:4]
+    if not state:
+        return None
+    lines: list[str] = []
+    for e in state:
+        path = e.get("path", "")
+        lines_count = e.get("total_lines", 0)
+        preview = e.get("preview", "")[:120].replace("\n", "\\n")
+        lines.append(f"  {path} ({lines_count} lines)")
+        if preview:
+            lines.append(f"    preview: {preview}")
+    if not lines:
+        return None
+    return _render_attachment(kind="recent_files", title="Recently Read Files", body="\n".join(lines))
+
+
+def _build_invoked_skills_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    skills = get_invoked_skills(metadata)
+    if not skills:
+        return None
+    return _render_attachment(
+        kind="invoked_skills",
+        title="Skills Used Earlier",
+        body=f"The following skills were previously loaded: {', '.join(skills)}.",
+    )
+
+
+def _build_verified_work_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    entries = get_recent_verified_work(metadata)[:8]
+    if not entries:
+        return None
+    lines = [f"  • {e}" for e in entries]
+    return _render_attachment(kind="verified_work", title="Recently Verified Work", body="\n".join(lines))
+
+
+def _build_work_log_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    entries = get_recent_work_log(metadata)[:8]
+    if not entries:
+        return None
+    lines = [f"  {e}" for e in entries]
+    return _render_attachment(kind="work_log", title="Recent Work Log", body="\n".join(lines))

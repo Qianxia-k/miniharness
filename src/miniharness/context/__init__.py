@@ -1,28 +1,30 @@
 """Context management — token budget, compaction, and message-list assembly.
 
-Public API surface (what external code should import from here):
+Architecture (clean separation, no cross-knowledge):
 
-    - ``ContextBudget`` — token counting and budget tracking
-    - ``ContextCompiler`` / ``ContextPacket`` — message-list assembly + compaction orchestration
-    - ``auto_compact_if_needed`` / ``compact_messages`` — compaction pipeline (4-tier)
-    - ``count_tokens`` — standalone token estimation
+    carryover.py  — OWNS tool_metadata (write + read + build attachments)
+    compactor.py — PURE 4-tier compaction (messages → compacted messages)
+    compiler.py  — THIN orchestrator (budget check → delegate to compactor)
+    budget.py    — Token counting
 
-Internal implementation details (used by ``AgentLoop`` but not part of the
-context module's public contract):
+Data flow::
 
-    - ``context.carryover`` — tool_metadata state management (import from there directly)
-    - ``context.working_set`` — legacy IDE-tab file tracker (deprecated, kept for reference)
+    loop.py
+      ├─ carryover.record_tool_carryover(metadata, ...)     [after each tool]
+      ├─ attachments = carryover.build_compact_attachments(metadata)
+      └─ compiler.compile(conversation, tools, attachments=attachments)
+           └─ auto_compact_if_needed(msgs, attachments=attachments)
+                └─ full_llm_compact(msgs, attachments=attachments)
 """
 
 from miniharness.context.budget import ContextBudget, count_tokens
-from miniharness.context.compactor import auto_compact_if_needed, compact_messages
+from miniharness.context.compactor import auto_compact_if_needed
 from miniharness.context.compiler import ContextCompiler, ContextPacket
 
 __all__ = [
+    "auto_compact_if_needed",
     "ContextBudget",
     "ContextCompiler",
     "ContextPacket",
-    "auto_compact_if_needed",
-    "compact_messages",
     "count_tokens",
 ]

@@ -388,20 +388,21 @@ async def _call_model_for_summary(
 async def full_llm_compact(
     messages: list[dict[str, Any]],
     *,
-    metadata: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     llm_stream=None,
     keep_last_n_turns: int = 3,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Full LLM compaction: structured summary + compact attachments.
 
+    *attachments* are pre-built by ``carryover.build_compact_attachments()``.
+    The compactor doesn't know about tool_metadata internals — it just
+    injects whatever attachments the caller provides.
+
     Steps:
     1. Run microcompact on the old segment as preparation.
     2. Find the cut point (keep last N user turns + everything after).
-    3. Build compact attachments from ``metadata`` for what's in the old segment.
-    4. Call the LLM to summarize the old segment.
-    5. Assemble: boundary marker → summary → recent messages → attachments.
-
-    This is the most expensive tier — it makes an LLM call.
+    3. Call the LLM to summarize the old segment.
+    4. Assemble: boundary marker → summary → recent messages → attachments.
     """
     stats: dict[str, Any] = {
         "full_compact_ran": False,
@@ -441,8 +442,8 @@ async def full_llm_compact(
         stats.update(sm_stats)
         return result, stats
 
-    # ---- build compact attachments from tool_metadata --------------------
-    attachment_msgs = build_compact_attachments(metadata or {})
+    # ---- compact attachments (pre-built by caller from tool_metadata) ----
+    attachment_msgs = attachments or []
     stats["attachments_built"] = len(attachment_msgs)
 
     # ---- assemble post-compact message list ------------------------------
@@ -483,151 +484,6 @@ async def full_llm_compact(
 
 
 # ---------------------------------------------------------------------------
-# Compact Attachments
-# ---------------------------------------------------------------------------
-
-def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build compact-attachment messages from ``tool_metadata``.
-
-    Each attachment is a ``role="user"`` message with a structured format:
-    ``[Compact attachment: <kind>] <title>`` followed by the body.
-
-    Attachments are built in priority order:
-    1. Task focus (goal, recent goals, active artifacts, verified state)
-    2. Recent files (from read_file_state)
-    3. Verified work
-    4. Work log
-    """
-    attachments: list[dict[str, Any]] = []
-    if not metadata:
-        return attachments
-
-    # 1. Task focus attachment.
-    tf = _build_task_focus_attachment(metadata)
-    if tf:
-        attachments.append(tf)
-
-    # 2. Recent files attachment.
-    rf = _build_recent_files_attachment(metadata)
-    if rf:
-        attachments.append(rf)
-
-    # 3. Verified work attachment.
-    vw = _build_verified_work_attachment(metadata)
-    if vw:
-        attachments.append(vw)
-
-    # 4. Work log attachment.
-    wl = _build_work_log_attachment(metadata)
-    if wl:
-        attachments.append(wl)
-
-    return attachments
-
-
-def _build_task_focus_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the task-focus compact attachment."""
-    tf = metadata.get("task_focus_state", {})
-    if not isinstance(tf, dict):
-        return None
-
-    goal = tf.get("goal", "")
-    recent_goals = tf.get("recent_goals", [])
-    active_artifacts = tf.get("active_artifacts", [])
-    verified_state = tf.get("verified_state", [])
-
-    if not goal and not active_artifacts and not verified_state:
-        return None
-
-    lines: list[str] = []
-    if goal:
-        lines.append(f"Goal: {goal}")
-    if recent_goals:
-        lines.append(f"Recent goals: {', '.join(recent_goals[-3:])}")
-    if active_artifacts:
-        lines.append(f"Active artifacts: {', '.join(active_artifacts[-5:])}")
-    if verified_state:
-        lines.append(f"Verified: {', '.join(verified_state[-4:])}")
-
-    if not lines:
-        return None
-
-    return _render_compact_attachment(
-        kind="task_focus",
-        title="Current Task & Progress",
-        body="\n".join(lines),
-    )
-
-
-def _build_recent_files_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the recent-files compact attachment from ``read_file_state``."""
-    state = metadata.get("read_file_state", [])
-    if not state:
-        return None
-
-    # Newest first, max 4.
-    entries = list(reversed(state))[:4]
-    lines: list[str] = []
-    for e in entries:
-        path = e.get("path", "")
-        lines_count = e.get("total_lines", 0)
-        preview = e.get("preview", "")[:120].replace("\n", "\\n")
-        lines.append(f"  {path} ({lines_count} lines)")
-        if preview:
-            lines.append(f"    preview: {preview}")
-
-    if not lines:
-        return None
-
-    return _render_compact_attachment(
-        kind="recent_files",
-        title="Recently Read Files",
-        body="\n".join(lines),
-    )
-
-
-def _build_verified_work_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the verified-work compact attachment."""
-    rvw = metadata.get("recent_verified_work", [])
-    if not rvw:
-        return None
-
-    entries = list(reversed(rvw))[:8]
-    lines = [f"  • {e}" for e in entries]
-    return _render_compact_attachment(
-        kind="verified_work",
-        title="Recently Verified Work",
-        body="\n".join(lines),
-    )
-
-
-def _build_work_log_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the work-log compact attachment."""
-    wl = metadata.get("recent_work_log", [])
-    if not wl:
-        return None
-
-    entries = list(reversed(wl))[:8]
-    lines = [f"  {e}" for e in entries]
-    return _render_compact_attachment(
-        kind="work_log",
-        title="Recent Work Log",
-        body="\n".join(lines),
-    )
-
-
-def _render_compact_attachment(*, kind: str, title: str, body: str) -> dict[str, Any]:
-    """Render a single compact attachment as a user message."""
-    return {
-        "role": "user",
-        "content": (
-            f"[Compact attachment: {kind}] {title}\n"
-            f"{body}"
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
 # Public API — 4-tier pipeline
 # ---------------------------------------------------------------------------
 
@@ -636,7 +492,7 @@ async def auto_compact_if_needed(
     messages: list[dict[str, Any]],
     *,
     budget,  # ContextBudget
-    metadata: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     llm_stream=None,
     keep_last_n_turns: int = 3,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -648,10 +504,11 @@ async def auto_compact_if_needed(
     3. Session Memory (free)
     4. Full LLM Compact (calls the model)
 
-    Returns ``(compacted_messages, stats)`` where *stats* records what
-    each tier did.
+    *attachments* are pre-built by ``carryover.build_compact_attachments()``
+    and injected during Tier 4.  Pass ``None`` if there is no carryover state.
+
+    Returns ``(compacted_messages, stats)``.
     """
-    meta = metadata or {}
 
     stats: dict[str, Any] = {
         "original_count": len(messages),
@@ -687,7 +544,7 @@ async def auto_compact_if_needed(
     if budget.is_over_budget(messages):
         messages, t4_stats = await full_llm_compact(
             messages,
-            metadata=meta,
+            attachments=attachments,
             llm_stream=llm_stream,
             keep_last_n_turns=keep_last_n_turns,
         )
@@ -704,27 +561,6 @@ async def auto_compact_if_needed(
 # ---------------------------------------------------------------------------
 # Legacy API (kept for backward compatibility)
 # ---------------------------------------------------------------------------
-
-async def compact_messages(
-    messages: list[dict[str, Any]],
-    *,
-    budget,
-    llm_stream,
-    keep_last_n_turns: int = 3,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Legacy wrapper — delegates to ``auto_compact_if_needed``.
-
-    Kept for backward compatibility with code that imports this function
-    directly.  New code should use ``auto_compact_if_needed`` instead.
-    """
-    return await auto_compact_if_needed(
-        messages,
-        budget=budget,
-        metadata=None,  # legacy path has no carryover metadata
-        llm_stream=llm_stream,
-        keep_last_n_turns=keep_last_n_turns,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
