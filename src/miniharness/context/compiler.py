@@ -1,17 +1,21 @@
 """Context Compiler — assembles the final message list for each API call.
 
-This is the single place where every piece of context comes together:
+Responsibilities (and what it does NOT do):
 
-    1. System prompt (static part)
-    2. Core Memory (``core.md``)
-    3. Conversation history (possibly compacted)
-    4. Tool definitions
+    ✅ Token budget check + 4-tier compaction orchestration
+    ✅ Compact attachment injection post-compaction
+    ✅ Post-compaction system-prompt integrity check (safety net)
 
-Before assembly the compiler checks the token budget and runs compaction
-when needed.  The result is a :class:`ContextPacket` that is ready to be
-passed directly to ``LLMClient.stream()``.
+    ❌ System prompt TEXT assembly — that's ``prompts/system.py``
+    ❌ Core Memory I/O — that's ``memory/core.py``
 
-Mirrors OpenHarness's context assembly in ``QueryEngine``.
+Design principle: the compiler manages the **message list** (what messages
+go into the API call and in what order).  It does NOT manage the **content**
+of individual messages — that's the caller's responsibility (``AgentLoop``
+delegates to ``prompts/system.py`` for the system prompt text).
+
+Mirrors OpenHarness's separation: ``QueryEngine`` owns messages + compaction,
+``prompts/context.py`` owns system prompt text assembly.
 """
 
 from __future__ import annotations
@@ -20,8 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from miniharness.context.budget import ContextBudget
-from miniharness.context.compactor import compact_messages
-from miniharness.messages import Conversation, Message
+from miniharness.context.compactor import auto_compact_if_needed
+from miniharness.messages import Conversation
 
 
 @dataclass
@@ -34,14 +38,20 @@ class ContextPacket:
 
 
 class ContextCompiler:
-    """Orchestrate budget, compaction, and message assembly.
+    """Orchestrate budget, compaction, and message-list assembly.
+
+    The compiler receives a fully-formed conversation (including a complete
+    system prompt assembled by ``prompts/system.py``), checks the token
+    budget, and runs the 4-tier compaction pipeline when needed.
 
     Usage::
 
-        compiler = ContextCompiler(budget, core_memory, llm_stream, keep_last_n=3)
-        packet = await compiler.compile(conversation, tools)
-        async for event in llm.stream(messages=packet.messages, tools=packet.tools):
-            ...
+        compiler = ContextCompiler(
+            budget=budget,
+            llm_stream=loop.llm.stream,
+            keep_last_n_turns=3,
+        )
+        packet = await compiler.compile(conversation, tools, metadata=tool_metadata)
 
     """
 
@@ -49,16 +59,12 @@ class ContextCompiler:
         self,
         *,
         budget: ContextBudget,
-        core_memory,
         llm_stream,
         keep_last_n_turns: int = 3,
-        working_set=None,
     ) -> None:
         self.budget = budget
-        self.core_memory = core_memory
         self.llm_stream = llm_stream
         self.keep_last_n_turns = keep_last_n_turns
-        self.working_set = working_set
 
     # ------------------------------------------------------------------
     # Public API
@@ -68,46 +74,55 @@ class ContextCompiler:
         self,
         conversation: Conversation,
         tools: list[dict[str, Any]],
+        *,
+        metadata: dict[str, Any] | None = None,
     ) -> ContextPacket:
         """Assemble the final context for an API call.
 
-        May run compaction if the conversation is over the token budget.
+        Parameters
+        ----------
+        conversation:
+            The current conversation history.  The first message MUST be
+            a complete system prompt (assembled by the caller).
+        tools:
+            OpenAI-format tool schemas.
+        metadata:
+            ``tool_metadata`` dict for compact attachments during Tier-4
+            compaction.  Pass ``None`` for legacy / stateless calls.
+
+        Returns
+        -------
+        ContextPacket
+            Ready-to-use messages + tools + compilation stats.
         """
         stats: dict[str, Any] = {
             "token_count": 0,
             "budget_ratio": 0.0,
             "compacted": False,
-            "stage1_truncated": False,
-            "stage2_summarised": False,
+            "tier1_microcompact": False,
+            "tier2_context_collapse": False,
+            "tier3_session_memory": False,
+            "tier4_full_llm_compact": False,
             "dropped": 0,
-            "compacted_summary": None,
+            "compacted_summary_chars": 0,
+            "attachments_built": 0,
         }
 
         # 1. Export conversation to OpenAI format.
         msgs = conversation.to_openai()
 
-        # 2. Count tokens & record baseline stats.
+        # 2. Post-compaction safety net: ensure the system prompt has not
+        #    been lost (e.g. if messages were restored from disk without one).
+        msgs = _ensure_system_prompt(msgs)
+
+        # 3. Count tokens & record baseline stats.
         stats["token_count"] = self.budget.tokens_used(msgs)
         stats["budget_ratio"] = self.budget.usage_ratio(msgs)
 
-        # 3. Compact if over budget.
+        # 4. Run 4-tier compaction if over budget.
         if self.budget.is_over_budget(msgs):
-            msgs, compaction_stats = await compact_messages(
-                msgs,
-                budget=self.budget,
-                llm_stream=self.llm_stream,
-                keep_last_n_turns=self.keep_last_n_turns,
-            )
-            stats["compacted"] = True
-            stats["stage1_truncated"] = compaction_stats.get("stage1_truncated", False)
-            stats["stage2_summarised"] = compaction_stats.get("stage2_summarised", False)
-            stats["dropped"] = compaction_stats["original_count"] - compaction_stats["final_count"]
-            stats["compacted_summary"] = compaction_stats.get("Compacted Summary")
-
-        # 4. Ensure the system prompt includes core memory + working set
-        #    (the first message is always the system prompt — refresh it so
-        #    changes are picked up even after restore_messages).
-        msgs = self._inject_system_context(msgs)
+            msgs, compaction_stats = await self._run_compaction(msgs, metadata=metadata)
+            stats.update(compaction_stats)
 
         # 5. Update final token count.
         stats["token_count"] = self.budget.tokens_used(msgs)
@@ -115,32 +130,97 @@ class ContextCompiler:
 
         return ContextPacket(messages=msgs, tools=tools, stats=stats)
 
+    async def compact_if_needed(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        metadata: dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Run compaction on raw message list (used for PTL reactive compaction).
+
+        Unlike :meth:`compile`, this works on raw OpenAI-format messages
+        (not a ``Conversation`` object) and can be forced to run even if
+        the budget check passes.
+        """
+        stats: dict[str, Any] = {
+            "token_count": self.budget.tokens_used(messages),
+            "budget_ratio": self.budget.usage_ratio(messages),
+            "compacted": False,
+            "tier1_microcompact": False,
+            "tier2_context_collapse": False,
+            "tier3_session_memory": False,
+            "tier4_full_llm_compact": False,
+            "dropped": 0,
+            "compacted_summary_chars": 0,
+            "attachments_built": 0,
+        }
+
+        should_compact = force or self.budget.is_over_budget(messages)
+        if not should_compact:
+            return messages, stats
+
+        # 👇 全部交给公共压缩函数，无冗余
+        msgs, compaction_stats = await self._run_compaction(messages, metadata=metadata)
+        stats.update(compaction_stats)
+
+        # 最终 token 统计
+        stats["token_count"] = self.budget.tokens_used(msgs)
+        stats["budget_ratio"] = self.budget.usage_ratio(msgs)
+
+        return msgs, stats
+
     # ------------------------------------------------------------------
-    # Internal
+    # 🔥 公共压缩函数（唯一一份逻辑，彻底去冗余）
     # ------------------------------------------------------------------
+    async def _run_compaction(
+        self,
+        msgs: list[dict[str, Any]],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Shared compaction logic used by both compile() and compact_if_needed()."""
+        msgs, compaction_stats = await auto_compact_if_needed(
+            msgs,
+            budget=self.budget,
+            metadata=metadata,
+            llm_stream=self.llm_stream,
+            keep_last_n_turns=self.keep_last_n_turns,
+        )
 
-    def _inject_system_context(
-        self, msgs: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Refresh core memory and working set in the system prompt."""
-        if not msgs or msgs[0].get("role") != "system":
-            return msgs
+        # 统一构建返回 stats
+        stats = {
+            "compacted": (
+                compaction_stats.get("tier1_microcompact", False)
+                or compaction_stats.get("tier2_context_collapse", False)
+                or compaction_stats.get("tier3_session_memory", False)
+                or compaction_stats.get("tier4_full_llm_compact", False)
+            ),
+            "tier1_microcompact": compaction_stats.get("tier1_microcompact", False),
+            "tier2_context_collapse": compaction_stats.get("tier2_context_collapse", False),
+            "tier3_session_memory": compaction_stats.get("tier3_session_memory", False),
+            "tier4_full_llm_compact": compaction_stats.get("tier4_full_llm_compact", False),
+            "dropped": (
+                compaction_stats["original_count"] - compaction_stats.get("final_count", len(msgs))
+            ),
+            "compacted_summary_chars": compaction_stats.get("full_compact_summary_chars", 0),
+            "attachments_built": compaction_stats.get("attachments_built", 0),
+        }
+        return msgs, stats
 
-        content = msgs[0]["content"]
 
-        # Core memory — inject if not already present.
-        core_text = self.core_memory.render_for_system_prompt()
-        if core_text and "Core Memory" not in content:
-            content = f"{content}\n\n{core_text}"
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-        # Working set — inject if there are active files.
-        if self.working_set is not None:
-            ws_text = self.working_set.render_for_context()
-            if ws_text:
-                # Remove any stale working-set section and append fresh.
-                if "[Working Set" in content:
-                    content = content.split("[Working Set")[0].rstrip()
-                content = f"{content}\n\n{ws_text}"
+_SYSTEM_PROMPT_PLACEHOLDER = (
+    "You are MiniHarness, a coding agent. "
+    "(System prompt was lost — please restore from session.)"
+)
 
-        msgs[0]["content"] = content
-        return msgs
+
+def _ensure_system_prompt(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Safety net: ensure the message list has a system prompt."""
+    if not msgs or msgs[0].get("role") != "system":
+        msgs.insert(0, {"role": "system", "content": _SYSTEM_PROMPT_PLACEHOLDER})
+    return msgs

@@ -1,20 +1,24 @@
-"""OpenAI-compatible LLM client with async streaming and retry.
+"""OpenAI-compatible LLM client with async streaming, retry, and PTL handling.
 
-This module owns the provider-facing API call. MiniHarness uses async streaming
-for all model calls, mirroring OpenHarness's SupportsStreamingMessages protocol.
+Production-grade features (Round 2 + 3):
 
-Retry policy (mirrors OpenHarness):
-    - Max 3 retries (4 attempts total).
-    - Exponential backoff: 1s -> 2s -> 4s + random jitter, capped at 30s.
-    - Retryable status codes: 429, 500, 502, 503, 529.
-    - Connection errors and timeouts are also retried.
+- **PTL (Prompt Too Long) detection**: raises ``PromptTooLongError`` so the
+  agent loop can trigger reactive compaction and retry.
+- **Completion-token-limit renegotiation**: if the model rejects ``max_tokens``
+  as too high, auto-reduces and retries.
+- **Rich event hierarchy** (Round 3.1): ``TextDelta``, ``StreamComplete``,
+  ``ToolExecutionStarted``, ``ToolExecutionCompleted``, ``ErrorEvent``,
+  ``StatusEvent``, ``CompactProgressEvent`` — all flow through the same
+  async iterator so the caller can observe every lifecycle moment.
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
+import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, AsyncIterator
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -26,13 +30,13 @@ from miniharness.providers import ProviderProfile
 
 
 # ---------------------------------------------------------------------------
-# Stream event types
+# Stream event types (Round 3.1 — rich hierarchy)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class StreamEvent:
-    """Base type for stream events."""
+    """Base type for all stream events."""
 
 
 @dataclass
@@ -49,9 +53,66 @@ class StreamComplete(StreamEvent):
     message: Message
 
 
+@dataclass
+class ToolExecutionStarted(StreamEvent):
+    """The harness is about to execute a tool call."""
+
+    tool_name: str
+    tool_input: dict[str, Any]
+
+
+@dataclass
+class ToolExecutionCompleted(StreamEvent):
+    """A tool has finished executing."""
+
+    tool_name: str
+    output: str
+    is_error: bool = False
+
+
+@dataclass
+class ErrorEvent(StreamEvent):
+    """An error surfaced to the user."""
+
+    message: str
+    recoverable: bool = True
+
+
+@dataclass
+class StatusEvent(StreamEvent):
+    """A transient system status message."""
+
+    message: str
+
+
+class CompactPhase(str, Enum):
+    """Phases of the compaction lifecycle (for CompactProgressEvent)."""
+
+    HOOKS_START = "hooks_start"
+    CONTEXT_COLLAPSE_START = "context_collapse_start"
+    CONTEXT_COLLAPSE_END = "context_collapse_end"
+    SESSION_MEMORY_START = "session_memory_start"
+    SESSION_MEMORY_END = "session_memory_end"
+    COMPACT_START = "compact_start"
+    COMPACT_RETRY = "compact_retry"
+    COMPACT_END = "compact_end"
+    COMPACT_FAILED = "compact_failed"
+
+
+@dataclass
+class CompactProgressEvent(StreamEvent):
+    """Structured progress event for conversation compaction."""
+
+    phase: CompactPhase
+    trigger: str  # "auto", "manual", "reactive"
+    message: str | None = None
+    attempt: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming response (kept for backward compatibility).
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class LLMResponse:
@@ -61,14 +122,103 @@ class LLMResponse:
 
 
 # ---------------------------------------------------------------------------
-# LLM client.
+# PTL (Prompt Too Long) exception
+# ---------------------------------------------------------------------------
+
+
+class PromptTooLongError(Exception):
+    """Raised when the API rejects a request because the prompt is too long.
+
+    The agent loop catches this, triggers reactive compaction, and retries.
+    """
+
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
+        super().__init__(message)
+        self.original_error = original_error
+
+
+class CompletionTokenLimitError(Exception):
+    """Raised when the model rejects ``max_tokens`` as too high.
+
+    The agent loop catches this, reduces max_tokens, and retries.
+    """
+
+    def __init__(self, message: str, supported_limit: int | None = None) -> None:
+        super().__init__(message)
+        self.supported_limit = supported_limit
+
+
+# ---------------------------------------------------------------------------
+# Error classification helpers
+# ---------------------------------------------------------------------------
+
+_PTL_NEEDLES: tuple[str, ...] = (
+    "prompt too long",
+    "context_length_exceeded",
+    "context length",
+    "maximum context",
+    "context window",
+    "input tokens exceed",
+    "messages resulted in",
+    "reduce the length of the messages",
+    "configured limit",
+    "too many tokens",
+    "too large for the model",
+    "maximum context length",
+    "exceed_context",
+    "exceeds the available context size",
+    "available context size",
+)
+
+
+def is_prompt_too_long_error(exc: Exception) -> bool:
+    """Return True if the exception indicates the prompt exceeded the context window."""
+    text = str(exc).lower()
+    return any(needle in text for needle in _PTL_NEEDLES)
+
+
+def is_completion_token_limit_error(exc: Exception) -> bool:
+    """Return True if the exception indicates max_tokens was rejected."""
+    text = str(exc).lower()
+    return ("max_tokens" in text or "max_completion_tokens" in text) and (
+        "too large" in text or "at most" in text or "completion tokens" in text
+    )
+
+
+def extract_completion_token_limit(exc: Exception) -> int | None:
+    """Try to extract the supported max_tokens limit from the error message."""
+    text = str(exc).lower().replace(",", "")
+    patterns = (
+        r"supports at most\s+(\d+)\s+completion tokens",
+        r"at most\s+(\d+)\s+completion tokens",
+        r"max(?:imum)?(?:_completion)?[_\s-]tokens.*?(?:<=|less than or equal to|at most)\s+(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return max(1, int(match.group(1)))
+            except ValueError:
+                return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# LLM client
 # ---------------------------------------------------------------------------
 
 _stderr = Console(stderr=True)
 
 
 class LLMClient:
-    """Async wrapper around an OpenAI-compatible chat completion client."""
+    """Async wrapper around an OpenAI-compatible chat completion client.
+
+    Production-grade features:
+    - Exponential backoff retry (429, 500, 502, 503, 529, connection errors)
+    - PTL (Prompt Too Long) detection → raises ``PromptTooLongError``
+    - Completion-token-limit renegotiation → raises ``CompletionTokenLimitError``
+    - Rich event stream (TextDelta, ToolExecutionStarted, StreamComplete, etc.)
+    """
 
     _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 529})
     _MAX_RETRIES: int = 3
@@ -104,6 +254,7 @@ class LLMClient:
         tools: list[dict[str, Any]],
         *,
         stream: bool,
+        max_tokens_override: int | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"model": self.model, "messages": messages}
         if stream:
@@ -117,7 +268,10 @@ class LLMClient:
             params["temperature"] = self.agent_settings.temperature
         if self.agent_settings.top_p is not None:
             params["top_p"] = self.agent_settings.top_p
-        if self.agent_settings.max_tokens is not None:
+        # max_tokens_override takes precedence (used for completion-token renegotiation).
+        if max_tokens_override is not None:
+            params["max_tokens"] = max_tokens_override
+        elif self.agent_settings.max_tokens is not None:
             params["max_tokens"] = self.agent_settings.max_tokens
         return params
 
@@ -147,14 +301,22 @@ class LLMClient:
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        max_tokens_override: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream a completion asynchronously, yielding text deltas then a final
-        StreamComplete.
+        """Stream a completion asynchronously.
 
-        Retries the initial connection with exponential backoff.
+        Yields :class:`TextDelta` events for each content chunk, then a final
+        :class:`StreamComplete` with the assembled message.
+
+        Raises :class:`PromptTooLongError` if the prompt exceeds the context
+        window (caller should compact and retry).
+
+        Raises :class:`CompletionTokenLimitError` if max_tokens is too high
+        (caller should reduce and retry).
         """
         client = self._create_client()
-        params = self._build_params(messages, tools, stream=True)
+        params = self._build_params(messages, tools, stream=True,
+                                     max_tokens_override=max_tokens_override)
 
         # --- retry loop for the initial connection ---
         for attempt in range(self._MAX_RETRIES + 1):
@@ -162,6 +324,18 @@ class LLMClient:
                 response_stream = await client.chat.completions.create(**params)
                 break
             except (APIStatusError, APIConnectionError, APITimeoutError) as exc:
+                # Check for PTL / completion-token-limit before retry decision.
+                if is_prompt_too_long_error(exc):
+                    raise PromptTooLongError(
+                        f"Prompt exceeds context window: {exc}", original_error=exc
+                    ) from exc
+                if is_completion_token_limit_error(exc):
+                    limit = extract_completion_token_limit(exc)
+                    raise CompletionTokenLimitError(
+                        f"max_tokens too high (supported: {limit}): {exc}",
+                        supported_limit=limit,
+                    ) from exc
+
                 if attempt == self._MAX_RETRIES or not self._is_retryable(exc):
                     raise
                 _stderr.print(

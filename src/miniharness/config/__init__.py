@@ -16,6 +16,7 @@ from dataclasses import replace
 
 from miniharness.config.settings import (
     AgentSettings as AgentSettings,
+    HookSettings as HookSettings,
     ProviderSettings as ProviderSettings,
     SandboxSettings as SandboxSettings,
     Settings,
