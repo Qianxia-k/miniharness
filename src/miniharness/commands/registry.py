@@ -97,7 +97,23 @@ class CommandRegistry:
                 aliases=[skill.name] if skill.name != cmd_name else None,
                 source="skill",
             )
+    def register_from_tools(self, tool_registry: Any) -> None:
+        """Auto-register commands for tools exposed by the model.
 
+        Future: this will allow models to dynamically add commands as they
+        discover new tools.
+        """
+        for tool in tool_registry.to_openai_tools():
+            cmd_name = tool["name"]
+            if not _is_valid_command_name(cmd_name):
+                continue
+
+            self.register(
+                cmd_name,
+                _make_tool_handler(tool),
+                description=tool.get("description", ""),
+                source="tool",
+            )
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------

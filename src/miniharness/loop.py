@@ -201,9 +201,9 @@ class AgentLoop:
 
         # ── Hook system (lifecycle extension points) ──────────────────
         hooks_config = _build_hooks_config(settings.hooks)
-        hook_registry = load_hook_registry(hooks_config)
+        self.hook_registry = load_hook_registry(hooks_config)
         self._hook_executor = HookExecutor(
-            registry=hook_registry,
+            registry=self.hook_registry,
             context=HookExecutionContext(
                 cwd=cwd,
                 llm_stream=self.llm.stream,

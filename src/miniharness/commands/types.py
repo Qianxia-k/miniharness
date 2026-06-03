@@ -50,6 +50,8 @@ class CommandContext:
         The skill registry (for skill-related commands).
     hook_registry:
         The hook registry (for hook-related commands).
+    tool_registry:
+        The tool registry (for tool-related commands — /tools, /tool).
     """
 
     loop: Any  # AgentLoop (avoid circular import)
@@ -57,6 +59,7 @@ class CommandContext:
     cwd: Path
     skill_registry: Any = None
     hook_registry: Any = None
+    tool_registry: Any = None
 
 
 # ---------------------------------------------------------------------------

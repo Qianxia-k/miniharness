@@ -23,7 +23,7 @@ from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
     cmd_clear, cmd_exit, cmd_help, cmd_history, cmd_hooks,
     cmd_max_tokens, cmd_memory, cmd_model, cmd_permissions,
-    cmd_skills, cmd_temperature, cmd_top_p, cmd_turns,
+    cmd_skills, cmd_temperature, cmd_tools, cmd_top_p, cmd_turns,
 )
 from miniharness.config import apply_cli_overrides, load_settings
 from miniharness.config.settings import Settings
@@ -382,6 +382,8 @@ def _build_command_registry(loop: AgentLoop) -> CommandRegistry:
                  description="Show hook configuration", source="builtin")
     reg.register("skills", cmd_skills,
                  description="List available skills", source="builtin")
+    reg.register("tools", cmd_tools,
+                 description="List, describe, or execute tools", source="builtin")
 
     # ── Session commands (need closure over loop) ──────────────────────
     reg.register("sessions", _make_sessions_handler(loop.cwd),
@@ -404,7 +406,8 @@ def _make_command_context(loop: AgentLoop) -> CommandContext:
         console=console,
         cwd=loop.cwd,
         skill_registry=getattr(loop, 'skill_registry', None),
-        hook_registry=getattr(loop, '_hook_executor', None),
+        hook_registry=getattr(loop, 'hook_registry', None),
+        tool_registry=getattr(loop, 'tools', None),
     )
 
 

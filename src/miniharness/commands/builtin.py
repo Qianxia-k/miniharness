@@ -64,6 +64,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /tag <name>         Tag current session")
     lines.append("  /hooks              Show active hook configuration")
     lines.append("  /skills             List available skills")
+    lines.append("  /tools              List, describe, or execute tools")
     lines.append("  /help               Show this help")
     lines.append("")
     lines.append("**Skill Commands** (type the skill name to invoke)")
@@ -265,6 +266,91 @@ def cmd_hooks(args: str, ctx: CommandContext) -> CommandResult:
 # ---------------------------------------------------------------------------
 # Skills list
 # ---------------------------------------------------------------------------
+
+
+def cmd_tools(args: str, ctx: CommandContext) -> CommandResult:
+    """List, describe, or execute tools.
+
+    Usage:
+        /tools               — list all tools
+        /tools <name>        — show a tool's input schema
+        /tools <name> <json> — execute a tool with JSON arguments
+    """
+    if ctx.tool_registry is None:
+        return CommandResult.ok("Tool registry not available.")
+
+    tools = ctx.tool_registry.to_openai_tools()
+
+    # No args: list all tools.
+    if not args:
+        lines = [f"**Available Tools** ({len(tools)} total)", ""]
+        for t in tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "?")
+            desc = fn.get("description", "").split("\n")[0]
+            max_desc = 80
+            if len(desc) > max_desc:
+                desc = desc[:max_desc - 3] + "..."
+            lines.append(f"  {name:<20} {desc}")
+        return CommandResult.ok("\n".join(lines))
+
+    # Parse: "/tools bash" or '/tools bash {"command": "ls"}'
+    parts = args.split(maxsplit=1)
+    tool_name = parts[0].strip()
+    json_args = parts[1].strip() if len(parts) > 1 else ""
+
+    # Find the tool.
+    tool = ctx.tool_registry.get(tool_name)
+    if tool is None:
+        similar = [t.get("function", {}).get("name", "") for t in tools
+                   if tool_name.lower() in t.get("function", {}).get("name", "")]
+        hint = f" Did you mean: {', '.join(similar)}?" if similar else ""
+        return CommandResult.ok(f"Tool '{tool_name}' not found.{hint}")
+
+    # Just show schema if no JSON args provided.
+    if not json_args:
+        fn = tool.to_openai_tool().get("function", {})
+        props = fn.get("parameters", {}).get("properties", {})
+        required = fn.get("parameters", {}).get("required", [])
+
+        lines = [f"**{tool.name}**", ""]
+        lines.append(f"  Description: {tool.description}")
+        lines.append(f"  Parameters:")
+        if props:
+            for pname, pinfo in props.items():
+                req = " (required)" if pname in required else ""
+                ptype = pinfo.get("type", "string")
+                pdesc = pinfo.get("description", "")
+                lines.append(f"    {pname}: {ptype}{req}")
+                if pdesc:
+                    lines.append(f"      {pdesc[:100]}")
+        else:
+            lines.append("    (none)")
+        lines.append("")
+        lines.append(f"  Usage: /tools {tool.name} '{{\"<param>\": \"<value>\"}}'")
+        return CommandResult.ok("\n".join(lines))
+
+    # Execute tool with JSON args.
+    import asyncio
+    import json
+    try:
+        arguments = json.loads(json_args) if json_args else {}
+    except json.JSONDecodeError as exc:
+        return CommandResult.ok(f"Invalid JSON: {exc}")
+
+    if not isinstance(arguments, dict):
+        return CommandResult.ok("Arguments must be a JSON object (dictionary).")
+
+    try:
+        result = asyncio.run(ctx.tool_registry.execute(tool_name, arguments))
+    except Exception as exc:
+        return CommandResult.ok(f"Tool execution error: {exc}")
+
+    output = result.output
+    if len(output) > 2000:
+        output = output[:2000] + f"\n...(truncated, {len(result.output)} total chars)"
+    status = "[error]" if result.is_error else "[ok]"
+    return CommandResult.ok(f"**/{tool_name}** {status}\n\n{output}")
 
 
 def cmd_skills(args: str, ctx: CommandContext) -> CommandResult:
