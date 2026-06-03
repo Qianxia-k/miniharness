@@ -1,8 +1,14 @@
 """Bundled skills — shipped with MiniHarness.
 
-These skills are loaded from the ``content/`` directory at package
-installation time.  They are always available and have the lowest
-priority (project and user skills can override them).
+Directory layout (standard ``<name>/SKILL.md`` convention)::
+
+    bundled/content/
+      commit/SKILL.md
+      code-review/SKILL.md
+      test/SKILL.md
+
+Each subdirectory is one skill.  Bundled skills have the lowest priority —
+project and user skills with the same name override them.
 """
 
 from __future__ import annotations
@@ -11,14 +17,11 @@ from miniharness.skills.types import SkillDefinition
 
 
 def get_bundled_skills() -> list[SkillDefinition]:
-    """Load all bundled skills from ``content/*.md``.
-
-    This is a separate function (not module-level) so import errors
-    don't prevent the skills package from loading.
-    """
+    """Load all bundled skills from ``content/<name>/SKILL.md``."""
     from miniharness.skills._frontmatter import parse_skill_frontmatter
 
     skills: list[SkillDefinition] = []
+
     try:
         import importlib.resources
         content_dir = importlib.resources.files(
@@ -31,25 +34,34 @@ def get_bundled_skills() -> list[SkillDefinition]:
         return skills
 
     for entry in sorted(content_dir.iterdir()):
-        if not entry.name.endswith(".md"):
+        # Each bundled skill is a subdirectory containing SKILL.md.
+        if not entry.is_dir():
             continue
+        skill_file = entry / "SKILL.md"
+        if not skill_file.is_file():
+            continue
+
         try:
-            content = entry.read_text(encoding="utf-8")
+            content = skill_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
 
-        default_name = entry.name[:-3]  # strip ".md"
+        # Default name from the subdirectory name (e.g. "code-review").
+        default_name = entry.name
+
         meta = parse_skill_frontmatter(
             content,
             default_name=default_name,
             fallback_template="Bundled skill: {name}",
         )
+
         skills.append(SkillDefinition(
             name=meta["name"],
             description=meta["description"],
             content=meta["body"],
             source="bundled",
-            path=str(entry),
-            base_dir=str(entry.parent),
+            path=str(skill_file),
+            base_dir=str(entry),  # skill-specific directory
         ))
+
     return skills

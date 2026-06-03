@@ -222,7 +222,7 @@ class TestRenameAndTag:
 
 class TestReplSessionSwitch:
     def test_resume_saves_current_before_switching_without_overwriting_target(self, tmp_path: Path):
-        from miniharness.cli import _repl_resume
+        from miniharness.cli import _make_resume_handler, _make_command_context
         from miniharness.config.settings import Settings
         from miniharness.loop import AgentLoop
 
@@ -237,8 +237,13 @@ class TestReplSessionSwitch:
         loop.session_id = "a"
         loop.restore_messages(current_a)
 
-        next_loop = _repl_resume("b", loop)
+        # Use the new command-based resume handler.
+        handler = _make_resume_handler(loop)
+        ctx = _make_command_context(loop)
+        result = handler("b", ctx)
+        next_loop = getattr(ctx, "_new_loop", loop)
 
+        assert result.message is not None  # confirmation message
         assert next_loop is not loop
         assert next_loop.session_id == "b"
         assert [

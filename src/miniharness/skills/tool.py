@@ -68,7 +68,16 @@ class SkillTool(BaseTool):
                 is_error=True,
             )
 
-        # Return the full markdown body as instructions.
+        # Apply template substitutions.
+        content = skill.content
+        if skill.base_dir:
+            content = content.replace("${SKILL_DIR}", skill.base_dir)
+            # Also support absolute path for bash commands.
+            content = (
+                f"Base directory for this skill: {skill.base_dir}\n\n"
+                + content
+            )
+
         return ToolResult(
-            f"[Loaded skill: {skill.name}]\n\n{skill.content}"
+            f"[Loaded skill: {skill.name}]\n\n{content}"
         )

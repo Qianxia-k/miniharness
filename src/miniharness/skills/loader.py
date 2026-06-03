@@ -78,34 +78,12 @@ def load_skill_registry(
 
 
 def _load_bundled_skills() -> list[SkillDefinition]:
-    """Load skills bundled with MiniHarness from ``skills/bundled/content/``."""
-    import importlib.resources
+    """Load skills bundled with MiniHarness.
 
-    skills: list[SkillDefinition] = []
-    try:
-        content_dir = importlib.resources.files(
-            "miniharness.skills.bundled.content"
-        )
-    except (ModuleNotFoundError, TypeError):
-        return skills
-
-    if not content_dir.is_dir():
-        return skills
-
-    for entry in sorted(content_dir.iterdir()):
-        if not entry.name.endswith(".md"):
-            continue
-        content = entry.read_text(encoding="utf-8")
-        skill = _parse_skill_file(
-            content=content,
-            source="bundled",
-            path=str(entry),
-            base_dir=str(entry.parent),
-        )
-        if skill is not None:
-            skills.append(skill)
-
-    return skills
+    Delegates to ``bundled.get_bundled_skills()`` — single source of truth.
+    """
+    from miniharness.skills.bundled import get_bundled_skills
+    return get_bundled_skills()
 
 
 # ---------------------------------------------------------------------------
