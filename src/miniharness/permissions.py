@@ -38,7 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rich.prompt import Confirm
+from rich.console import Console
+
+
+_console = Console()
 
 
 PermissionMode = Literal["default", "accept-edits", "bypass", "plan"]
@@ -273,12 +276,41 @@ class PermissionChecker:
         """If the result requires confirmation, ask the user interactively."""
         if not result.requires_confirmation:
             return result
-        if Confirm.ask(f"  [bold yellow]?[/] {prompt}", default=False):
+        if _ask_confirmation(prompt):
             return PermissionDecision(True)
         return PermissionDecision(False, reason="User denied.")
+
+    def resolve_interactive(
+        self, result: PermissionDecision, prompt: str
+    ) -> PermissionDecision:
+        """Public wrapper for registry-level permission prompts."""
+        return self._resolve_interactive(result, prompt)
 
     def _relative(self, path: Path) -> str:
         try:
             return str(path.relative_to(self.cwd))
         except ValueError:
             return str(path)
+
+
+def _ask_confirmation(prompt: str) -> bool:
+    """Read a yes/no permission response from stdin with a deny-by-default policy.
+
+    Rich's Confirm helper is convenient, but in a streaming REPL it can leave
+    residual input behind when stdout is busy. A direct line read keeps the
+    permission prompt atomic: exactly one stdin line is consumed per decision.
+    """
+    while True:
+        _console.print(f"  [bold yellow]?[/] {prompt} [y/n] (n): ", end="")
+        try:
+            answer = input()
+        except (EOFError, KeyboardInterrupt):
+            _console.print()
+            return False
+
+        normalized = answer.strip().lower()
+        if normalized in {"y", "yes"}:
+            return True
+        if normalized in {"", "n", "no"}:
+            return False
+        _console.print("[yellow]Please answer y or n.[/yellow]")

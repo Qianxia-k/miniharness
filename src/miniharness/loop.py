@@ -66,6 +66,7 @@ from miniharness.hooks import (
     HookEvent,
     HookExecutionContext,
     HookExecutor,
+    HookResult,
     load_hook_registry,
 )
 from miniharness.config.settings import HookSettings
@@ -74,7 +75,6 @@ from miniharness.hooks.presets import (
     audit_log_preset,
     code_security_preset,
     dangerous_command_preset,
-    production_presets,
     sensitive_file_preset,
     merge_config
 )
@@ -86,13 +86,14 @@ from miniharness.llm import (
     StreamComplete,
     TextDelta,
 )
+from miniharness.mcp import McpClientManager, load_mcp_server_configs
 from miniharness.memory.core import CoreMemory
 from miniharness.messages import Conversation, Message
 from miniharness.permissions import PermissionChecker
 from miniharness.prompts.system import assemble_system_prompt
 from miniharness.providers import get_profile
 from miniharness.skills import SkillTool, load_skill_registry
-from miniharness.tool_registry import ToolRegistry, create_default_registry
+from miniharness.tool_registry import create_default_registry
 from miniharness.tools.offload import offload_if_needed
 
 
@@ -179,7 +180,17 @@ class AgentLoop:
             agent_settings=settings.agent,
         )
         self.permissions = PermissionChecker(cwd=cwd)
-        self.tools = create_default_registry(cwd=cwd, permissions=self.permissions)
+
+        # ── MCP (Model Context Protocol) — created before tools so
+        #     it can be passed to create_default_registry. ──────────
+        self._mcp_manager = McpClientManager(
+            load_mcp_server_configs(settings, cwd=cwd)
+        )
+
+        self.tools = create_default_registry(
+            cwd=cwd, permissions=self.permissions,
+            mcp_manager=self._mcp_manager,
+        )
 
         # ── Skills system ────────────────────────────────────────────
         self.skill_registry = load_skill_registry(cwd=cwd)
@@ -217,6 +228,7 @@ class AgentLoop:
         self.session_id: str | None = None
         self.tag: str = ""
         self._session_started = False  # lazy fire of SESSION_START hook
+        self._mcp_connected = False  # lazy connect MCP on first run()
 
         # ── Conversation (first message = system prompt) ──────────────
         system_content = self._build_system_prompt(user_query="")
@@ -232,6 +244,31 @@ class AgentLoop:
 
         Returns the final assistant text, or an error description.
         """
+        # ── Lazy MCP connect (first run only) ─────────────────────────
+        if not self._mcp_connected:
+            self._mcp_connected = True
+            if self._mcp_manager._configs:
+                try:
+                    await self._mcp_manager.connect_all()
+                except Exception as exc:
+                    from rich.console import Console
+                    Console().print(f"  [yellow]! MCP connection failed: {exc}[/yellow]")
+
+                # Print diagnostic summary and register discovered tools.
+                _print_mcp_diagnostics(self._mcp_manager)
+
+                for tool_info in self._mcp_manager.list_tools():
+                    from miniharness.mcp.tool_adapter import McpToolAdapter
+                    try:
+                        self.tools.register(McpToolAdapter(
+                            manager=self._mcp_manager,
+                            tool_info=tool_info,
+                            cwd=self.cwd,
+                            permissions=self.permissions,
+                        ))
+                    except Exception:
+                        pass
+
         # ── Per-turn setup ────────────────────────────────────────────
         self._refresh_system_prompt(user_query=prompt)
         remember_user_goal(self.tool_metadata, prompt)
@@ -467,6 +504,7 @@ class AgentLoop:
             user_query=user_query,
             tool_count=len(self.tools._tools),
             skill_registry=self.skill_registry,
+            mcp_manager=self._mcp_manager,
         )
 
     def _refresh_system_prompt(self, *, user_query: str = "") -> None:
@@ -566,8 +604,39 @@ class AgentLoop:
                 )
             ])
 
+    @property
+    def mcp_manager(self):
+        """Expose the MCP manager for /mcp command introspection."""
+        return self._mcp_manager
+
     def _replace_conversation(self, messages: list[dict]) -> None:
         """Replace the live conversation with a compacted message list."""
         self.conversation = Conversation()
         for m in messages:
             self.conversation.append(Message(**m))
+
+
+# ---------------------------------------------------------------------------
+# MCP diagnostics (called from run())
+# ---------------------------------------------------------------------------
+
+
+def _print_mcp_diagnostics(mcp_manager) -> None:
+    """Print a one-line summary of MCP server connection status."""
+    from rich.console import Console
+    c = Console()
+    statuses = mcp_manager.list_statuses()
+    tools_count = len(mcp_manager.list_tools())
+    connected = sum(1 for s in statuses if s.state == "connected")
+
+    if not statuses:
+        return
+
+    if connected > 0:
+        c.print(f"  [dim]MCP: {connected} server(s) connected, {tools_count} tool(s) available[/dim]")
+
+    for s in statuses:
+        if s.state == "failed":
+            c.print(f"  [yellow]! MCP server '{s.name}': {s.detail[:150]}[/yellow]")
+        elif s.state == "pending":
+            c.print(f"  [dim]MCP server '{s.name}' pending (will retry next run)[/dim]")

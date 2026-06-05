@@ -23,6 +23,22 @@ class ToolResult:
     is_error: bool = False
 
 
+@dataclass(frozen=True)
+class ToolPermissionRequest:
+    """Permission facts extracted from one tool invocation.
+
+    Tools that need registry-level policy checks return one or more of these
+    before execution.  Built-in tools can keep their existing internal checks;
+    adapters for external tools, especially MCP, should use this so they do not
+    bypass MiniHarness permission modes.
+    """
+
+    is_read_only: bool
+    file_path: str | None = None
+    command: str | None = None
+    reason: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Pydantic → OpenAI schema converter
 # ---------------------------------------------------------------------------
@@ -105,3 +121,13 @@ class BaseTool:
     async def execute(self, arguments: BaseModel) -> ToolResult:
         """Execute this tool with a validated Pydantic model instance."""
         raise NotImplementedError
+
+    def permission_requests(self, arguments: BaseModel) -> list[ToolPermissionRequest]:
+        """Return registry-level permission checks required before execution.
+
+        The default is empty for backward compatibility with built-in tools
+        that already perform their own permission checks inside ``execute``.
+        External tool adapters should override this.
+        """
+        del arguments
+        return []

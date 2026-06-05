@@ -280,13 +280,12 @@ def audit_log_preset(
                     f"echo '{{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
                     f"\"event\":\"pre_tool_use\","
                     f"\"tool\":\"$TOOL_NAME\","
-                    f"\"session\":\"$SESSION_ID\","
-                    f"\"input\":$ARGUMENTS}}' "
+                    f"\"session\":\"$SESSION_ID\"}}' "
                     f">> {log_dir}/audit.jsonl"
                 ),
-                "matcher": None,   # match ALL tools
+                "matcher": None,
                 "block_on_failure": False,
-                "timeout_seconds": 10,
+                "timeout_seconds": 5,
             },
         ],
         "post_tool_use": [

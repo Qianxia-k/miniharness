@@ -98,6 +98,9 @@ class Settings:
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
     hooks: HookSettings = field(default_factory=HookSettings)
+    # {name: McpStdioServerConfig | McpHttpServerConfig | dict}
+    # dict values are validated by mcp.config.load_mcp_server_configs().
+    mcp_servers: dict = field(default_factory=dict)
     max_turns: int = 8
     context_budget_ratio: float = 0.8  # trigger compaction at 80% context usage
     keep_last_n_turns: int = 3  # when compacting, always keep the last N turns intact

@@ -65,6 +65,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /hooks              Show active hook configuration")
     lines.append("  /skills             List available skills")
     lines.append("  /tools              List, describe, or execute tools")
+    lines.append("  /mcp                Show MCP server connection status")
     lines.append("  /help               Show this help")
     lines.append("")
     lines.append("**Skill Commands** (type the skill name to invoke)")
@@ -266,6 +267,32 @@ def cmd_hooks(args: str, ctx: CommandContext) -> CommandResult:
 # ---------------------------------------------------------------------------
 # Skills list
 # ---------------------------------------------------------------------------
+
+
+def cmd_mcp(args: str, ctx: CommandContext) -> CommandResult:
+    """Show MCP server connection status."""
+    if ctx.loop is None:
+        return CommandResult.ok("MCP manager not available.")
+
+    mcp = getattr(ctx.loop, 'mcp_manager', None)
+    if mcp is None:
+        return CommandResult.ok("MCP manager not available.")
+
+    statuses = mcp.list_statuses()
+    if not statuses:
+        return CommandResult.ok("No MCP servers configured.\n\n"
+                                "Add servers in settings: settings.mcp_servers = {...}")
+
+    lines = ["**MCP Servers**", ""]
+    for s in statuses:
+        icon = {"connected": "✅", "pending": "⏳", "failed": "❌", "disabled": "⚫"}.get(s.state, "?")
+        lines.append(f"  {icon} {s.name} [{s.state}] {s.transport}")
+        if s.detail:
+            lines.append(f"     {s.detail[:120]}")
+        if s.tools:
+            lines.append(f"     Tools: {len(s.tools)} ({', '.join(t.name for t in s.tools[:5])}"
+                         f"{'...' if len(s.tools) > 5 else ''})")
+    return CommandResult.ok("\n".join(lines))
 
 
 def cmd_tools(args: str, ctx: CommandContext) -> CommandResult:

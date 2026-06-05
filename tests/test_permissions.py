@@ -8,7 +8,7 @@ These tests verify that the permission system correctly handles:
 """
 
 from pathlib import Path
-from miniharness.permissions import PermissionChecker, PermissionDecision
+from miniharness.permissions import PermissionChecker, PermissionDecision, _ask_confirmation
 
 
 # ===================================================================
@@ -110,6 +110,18 @@ def test_modes():
     assert cmd_result.requires_confirmation
 
     print("Mode behavior verified.")
+
+
+def test_confirmation_accepts_single_yes_line(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda: "y")
+
+    assert _ask_confirmation("Allow test?") is True
+
+
+def test_confirmation_denies_empty_line(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda: "")
+
+    assert _ask_confirmation("Allow test?") is False
 
 
 # ===================================================================

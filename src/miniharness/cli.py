@@ -22,9 +22,10 @@ from rich.console import Console
 from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
     cmd_clear, cmd_exit, cmd_help, cmd_history, cmd_hooks,
-    cmd_max_tokens, cmd_memory, cmd_model, cmd_permissions,
+    cmd_max_tokens, cmd_mcp, cmd_memory, cmd_model, cmd_permissions,
     cmd_skills, cmd_temperature, cmd_tools, cmd_top_p, cmd_turns,
 )
+from miniharness.commands.types import CommandResult
 from miniharness.config import apply_cli_overrides, load_settings
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
@@ -320,7 +321,8 @@ async def _run_repl(
                     break
 
                 if result.submit_prompt:
-                    await loop.run(result.submit_prompt)
+                    if not await _run_repl_turn(loop, result.submit_prompt):
+                        continue
                     console.print()
                     should_save = True
 
@@ -334,16 +336,40 @@ async def _run_repl(
                 if result.should_save and not result.exit:
                     should_save = True
             else:
-                await loop.run(line)
+                if not await _run_repl_turn(loop, line):
+                    continue
                 console.print()
                 should_save = True
 
             if should_save:
                 save_loop_snapshot(loop)
     finally:
+        # Close MCP connections before event loop tears down.
+        mcp = getattr(loop, '_mcp_manager', None)
+        if mcp is not None:
+            try:
+                await mcp.close()
+            except Exception:
+                pass
+
         if settings.sandbox.enabled:
             from miniharness.sandbox import stop_sandbox
             await stop_sandbox()
+
+
+async def _run_repl_turn(loop: AgentLoop, prompt: str) -> bool:
+    """Run one user turn in the REPL.
+
+    Ctrl-C during a running model/tool turn cancels that turn and returns to
+    the prompt. Slash commands such as /q are only read between turns because
+    the REPL owns stdin synchronously.
+    """
+    try:
+        await loop.run(prompt)
+        return True
+    except asyncio.CancelledError:
+        console.print("\n[yellow]Cancelled current turn.[/yellow]")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -384,6 +410,8 @@ def _build_command_registry(loop: AgentLoop) -> CommandRegistry:
                  description="List available skills", source="builtin")
     reg.register("tools", cmd_tools,
                  description="List, describe, or execute tools", source="builtin")
+    reg.register("mcp", cmd_mcp,
+                 description="Show MCP server connection status", source="builtin")
 
     # ── Session commands (need closure over loop) ──────────────────────
     reg.register("sessions", _make_sessions_handler(loop.cwd),

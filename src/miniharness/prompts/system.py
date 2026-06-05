@@ -190,13 +190,14 @@ def assemble_system_prompt(
     user_query: str = "",
     tool_count: int = 0,
     skill_registry=None,  # SkillRegistry | None
+    mcp_manager=None,     # McpClientManager | None
 ) -> str:
     """Assemble the full system prompt for a turn.
 
     Sections (in order):
     1. Base instructions (the static SYSTEM_PROMPT)
     2. Environment info (OS, shell, date, cwd)
-    3. Tool availability hint
+    3. Tool availability hint + MCP status (if connected)
     4. Available Skills (if any)
     5. Core Memory (stable project context)
     6. Relevant memories (on-demand, keyword-matched to query)
@@ -233,7 +234,13 @@ def assemble_system_prompt(
             f"search, and execute code in the workspace."
         )
 
-    # 2b. Available Skills.
+    # 2b. MCP server status (if any connected).
+    if mcp_manager is not None:
+        mcp_section = _build_mcp_section(mcp_manager)
+        if mcp_section:
+            sections.append(mcp_section)
+
+    # 2c. Available Skills.
     if skill_registry is not None:
         skills_section = _build_skills_section(skill_registry)
         if skills_section:
@@ -253,6 +260,33 @@ def assemble_system_prompt(
             sections.append(memory_block)
 
     return "\n\n".join(sections)
+
+
+def _build_mcp_section(mcp_manager) -> str | None:
+    """Build the 'MCP Servers' block for the system prompt.
+
+    Tells the model about connected MCP servers and their tools so it
+    knows what the ``mcp__<server>__<tool>`` functions are for.
+    """
+    statuses = mcp_manager.list_statuses()
+    connected = [s for s in statuses if s.state == "connected"]
+    if not connected:
+        return None
+
+    lines = ["# MCP Servers", ""]
+    lines.append(
+        "The following external servers are connected via MCP (Model Context "
+        "Protocol).  Their tools are available with names like "
+        "`mcp__<server>__<tool>`.  Use `list_mcp_resources` and "
+        "`read_mcp_resource` to access server data."
+    )
+    lines.append("")
+    for s in connected:
+        tool_names = ", ".join(t.name for t in s.tools[:8])
+        more = f" +{len(s.tools) - 8} more" if len(s.tools) > 8 else ""
+        lines.append(f"- **{s.name}** ({len(s.tools)} tools): {tool_names}{more}")
+
+    return "\n".join(lines)
 
 
 def _build_skills_section(registry) -> str | None:
