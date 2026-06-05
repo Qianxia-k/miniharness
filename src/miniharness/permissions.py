@@ -248,7 +248,21 @@ class PermissionChecker:
         )
 
     def can_write(self, path: Path) -> PermissionDecision:
-        """Check write permission with interactive confirmation."""
+        """Check write permission with interactive confirmation.
+
+        Also rejects garbage filenames that look like shell artifacts
+        (e.g. ``C[CLI`` from broken markdown link parsing).
+        """
+        # Reject paths with clearly garbage characters.
+        name = path.name
+        garbage_chars = set("[]{}()$`\\")
+        if any(c in name for c in garbage_chars):
+            return PermissionDecision(
+                False,
+                reason=f"Filename contains invalid characters: {name!r}. "
+                       f"Remove brackets/braces/dollar/backtick from the path.",
+            )
+
         result = self.evaluate(
             tool_name="write_file",
             file_path=str(path),
