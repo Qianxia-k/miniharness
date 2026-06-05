@@ -15,21 +15,12 @@ def load_mcp_server_configs(
     settings,
     *,
     cwd: str | Path | None = None,
+    plugins: list | None = None,  # list[LoadedPlugin] | None
 ) -> dict[str, McpServerConfig]:
-    """Extract and validate MCP server configs from ``Settings.mcp_servers``.
+    """Extract and validate MCP server configs from settings + plugins.
 
-    Handles both typed configs (``McpStdioServerConfig``, ``McpHttpServerConfig``)
-    and raw dicts that look like valid configs.
-
-    Parameters
-    ----------
-    settings:
-        A ``Settings`` object with an ``mcp_servers`` field (dict).
-
-    Returns
-    -------
-    dict[str, McpServerConfig]
-        Validated server configs ready for ``McpClientManager``.
+    Plugin MCP servers are namespaced as ``{plugin}:{server}`` and added
+    only if the name doesn't already exist (settings override plugins).
     """
     raw = getattr(settings, "mcp_servers", None)
     if raw is None or not isinstance(raw, dict):
@@ -72,6 +63,24 @@ def load_mcp_server_configs(
                     continue  # unknown type → skip.
             except Exception:
                 continue  # invalid config → skip.
+
+    # Plugin MCP servers (namespaced, settings override).
+    for plugin in (plugins or []):
+        if not getattr(plugin, "enabled", True):
+            continue
+        for name, cfg in getattr(plugin, "mcp_servers", {}).items():
+            namespaced = f"{plugin.name}:{name}"
+            if namespaced not in configs:
+                if isinstance(cfg, dict) and cfg.get("type") == "stdio":
+                    try:
+                        configs[namespaced] = McpStdioServerConfig(**cfg)
+                    except Exception:
+                        pass
+                elif isinstance(cfg, dict) and cfg.get("type") == "http":
+                    try:
+                        configs[namespaced] = McpHttpServerConfig(**cfg)
+                    except Exception:
+                        pass
 
     return configs
 

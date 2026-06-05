@@ -5,8 +5,9 @@ from miniharness.config.settings import Settings
 from miniharness.mcp.client import McpClientManager
 from miniharness.mcp.config import load_mcp_server_configs
 from miniharness.mcp.tool_adapter import McpToolAdapter
-from miniharness.mcp.types import McpToolInfo
+from miniharness.mcp.types import McpConnectionStatus, McpToolInfo
 from miniharness.permissions import PermissionChecker
+from miniharness.plugins.gating import is_tool_visible
 from miniharness.tool_registry import ToolRegistry
 
 
@@ -157,6 +158,119 @@ def test_unknown_mcp_tool_requires_permission_by_default(tmp_path: Path, monkeyp
     assert manager.calls == []
 
 
+def test_inactive_plugin_mcp_tool_is_hidden_and_blocked(tmp_path: Path):
+    plugin_index = [{"name": "demo-plugin", "active": False}]
+    registry = ToolRegistry(
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+        is_tool_enabled=lambda _name, tool: is_tool_visible(tool, plugin_index),
+    )
+    manager = _FakeMcpManager()
+    adapter = McpToolAdapter(
+        manager=manager,
+        tool_info=McpToolInfo(
+            server_name="demo-plugin:filesystem",
+            name="read_file",
+            description="Read a plugin file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        ),
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+    registry.register(adapter)
+
+    exposed_names = {
+        t["function"]["name"]
+        for t in registry.to_openai_tools()
+    }
+    assert adapter.name not in exposed_names
+
+    result = asyncio.run(registry.execute(adapter.name, {"path": str(tmp_path / "a.txt")}))
+
+    assert result.is_error
+    assert "not active" in result.output
+    assert manager.calls == []
+
+
+def test_active_plugin_mcp_tool_is_exposed_and_executable(tmp_path: Path):
+    plugin_index = [{"name": "demo-plugin", "active": True}]
+    registry = ToolRegistry(
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+        is_tool_enabled=lambda _name, tool: is_tool_visible(tool, plugin_index),
+    )
+    manager = _FakeMcpManager()
+    adapter = McpToolAdapter(
+        manager=manager,
+        tool_info=McpToolInfo(
+            server_name="demo-plugin:filesystem",
+            name="read_file",
+            description="Read a plugin file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        ),
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+    registry.register(adapter)
+
+    exposed_names = {
+        t["function"]["name"]
+        for t in registry.to_openai_tools()
+    }
+    assert adapter.name in exposed_names
+
+    result = asyncio.run(registry.execute(adapter.name, {"path": str(tmp_path / "a.txt")}))
+
+    assert not result.is_error
+    assert manager.calls == [("demo-plugin:filesystem", "read_file", {"path": str(tmp_path / "a.txt")})]
+
+
+def test_system_prompt_hides_inactive_plugin_mcp_servers(tmp_path: Path):
+    from miniharness.prompts.system import assemble_system_prompt
+
+    manager = _FakeStatusManager([
+        McpConnectionStatus(
+            name="filesystem",
+            state="connected",
+            transport="stdio",
+            tools=[McpToolInfo(server_name="filesystem", name="read_file")],
+        ),
+        McpConnectionStatus(
+            name="demo-plugin:filesystem",
+            state="connected",
+            transport="stdio",
+            tools=[McpToolInfo(server_name="demo-plugin:filesystem", name="plugin_read")],
+        ),
+    ])
+    plugin_index = [{"name": "demo-plugin", "active": False}]
+
+    prompt = assemble_system_prompt(
+        base_prompt="You are an agent.",
+        cwd=tmp_path,
+        mcp_manager=manager,
+        plugin_index=plugin_index,
+    )
+
+    assert "**filesystem**" in prompt
+    assert "demo-plugin:filesystem" not in prompt
+
+    plugin_index[0]["active"] = True
+    prompt = assemble_system_prompt(
+        base_prompt="You are an agent.",
+        cwd=tmp_path,
+        mcp_manager=manager,
+        plugin_index=plugin_index,
+    )
+
+    assert "demo-plugin:filesystem" in prompt
+
+
 class _FakeMcpManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict]] = []
@@ -164,3 +278,11 @@ class _FakeMcpManager:
     async def call_tool(self, server_name: str, tool_name: str, arguments: dict) -> str:
         self.calls.append((server_name, tool_name, arguments))
         return "ok"
+
+
+class _FakeStatusManager:
+    def __init__(self, statuses: list[McpConnectionStatus]) -> None:
+        self._statuses = statuses
+
+    def list_statuses(self) -> list[McpConnectionStatus]:
+        return self._statuses

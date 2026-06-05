@@ -1,207 +1,401 @@
 # MiniHarness
 
-MiniHarness 是一个以教学为导向的迷你编码代理框架。它保留了代理循环的核心能力——流式模型调用、工具执行、权限控制、会话持久化、记忆、hooks 和上下文压缩——同时尽量保持代码体量小、结构清晰，方便读完就能看懂。
+MiniHarness 是一个从零构建的紧凑型 coding-agent harness。它参考
+OpenHarness 这类更完整系统的架构边界，但保持代码规模可读；同时已经覆盖
+真实项目中 agent 必须面对的核心问题：会话隔离、工具 schema、权限、hooks、
+MCP、skills、plugins、记忆和上下文压缩。
 
 English: [README.md](./README.md)
 
-## 它能做什么
+## MiniHarness 是什么
 
-- 运行单代理对话循环，并支持异步流式输出。
-- 支持 Qwen（DashScope）、OpenAI 和 OpenAI-Compatible 接口。
-- 通过 Pydantic 校验，向模型暴露 workspace 工具。
-- 将会话保存到磁盘，方便后续恢复。
-- 使用本地文件维护轻量级项目记忆。
-- 通过权限和 hooks 做分层安全控制。
-- 支持在可选的 Docker 沙箱里执行 bash。
+MiniHarness 运行一个单 agent 循环：
 
-## 架构概览
+```text
+用户输入
+  -> 动态 system prompt + 会话历史
+  -> OpenAI-compatible 流式模型调用
+  -> 通过 ToolRegistry 执行工具
+  -> 权限 / hook 检查
+  -> 工具结果写回会话
+  -> 循环直到最终 assistant 响应
+```
+
+它不是完整 OpenHarness 克隆。它的目标是一个可读、可验证、工程边界清晰的
+miniature。
+
+## 当前能力
+
+- OpenAI-compatible 异步流式 chat completion。
+- 支持 Qwen/DashScope、OpenAI 和兼容接口 provider profile。
+- 内置工具使用 Pydantic 校验，并暴露为 OpenAI tool schema。
+- 支持 stdio 和 HTTP MCP server。
+- MCP filesystem server 支持 `${cwd}` / `${workspace}` 自适应根目录。
+- MCP 工具接入 registry-level permission，内置工具也有权限检查。
+- Skills 可从 bundled、project、user、plugin 多来源加载。
+- Plugins 可贡献 skills、hooks 和 MCP server config。
+- 会话保存、列表、恢复、tag、切换，并避免旧 loop 被原地污染。
+- 本地 core、semantic、episodic memory。
+- Hooks 预设覆盖危险命令、敏感路径、人类确认和审计日志。
+- 上下文预算管理和多层压缩。
+- 可选 Docker sandbox 执行 shell。
+
+## 架构
 
 ```mermaid
 flowchart LR
-    U[用户输入] --> C[CLI / REPL]
-    C --> L[AgentLoop]
-    L --> P[LLMClient]
-    L --> T[ToolRegistry]
-    L --> M[记忆 + 会话]
-    L --> H[权限 + Hooks]
-    P --> O[流式输出]
-    T --> O
-    M --> O
-    H --> O
+    U[User / REPL] --> CLI[CLI and Commands]
+    CLI --> L[AgentLoop]
+    L --> SP[System Prompt Assembly]
+    L --> C[Context Compiler]
+    L --> LLM[LLMClient]
+    L --> TR[ToolRegistry]
+    TR --> BT[Built-in Tools]
+    TR --> MCP[MCP Tool Adapters]
+    TR --> SK[Skill Tool]
+    L --> PERM[Permissions]
+    L --> HOOK[Hooks]
+    L --> MEM[Memory]
+    L --> SESS[Sessions]
+    L --> PLUG[Plugins]
 ```
 
-主流程可以理解为：
+关键模块：
 
-`用户输入 → 会话历史 → 流式 LLM 调用 → 工具执行 → 循环直到最终答案`
+```text
+src/miniharness/cli.py              CLI、REPL、slash commands
+src/miniharness/loop.py             AgentLoop 编排
+src/miniharness/llm.py              OpenAI-compatible 流式客户端
+src/miniharness/tool_registry.py    工具 schema 注册与执行
+src/miniharness/tools/              内置工具
+src/miniharness/mcp/                MCP 配置、client、adapter、resources
+src/miniharness/skills/             Skill 发现与运行时加载
+src/miniharness/plugins/            Plugin 发现与贡献项
+src/miniharness/permissions.py      权限决策与交互确认
+src/miniharness/hooks/              Hook 事件、预设、执行器
+src/miniharness/context/            预算、carryover、压缩
+src/miniharness/sessions/           会话存储与切换
+src/miniharness/memory/             Core、semantic、episodic memory
+```
 
-## 真实实现能力
+## 工具模型
 
-### 代理循环
+MiniHarness 不是只把工具名字和 description 写进 prompt，而是通过模型 API
+传入 OpenAI 风格 tool schema。
 
-- 支持异步流式输出，并能处理 tool calls。
-- 对临时 API 错误做指数退避 + 抖动重试。
-- 当 prompt 超过上下文限制时，会触发上下文压缩后重试。
-- 当提供方拒绝当前 `max_tokens` 时，会自动降档重试。
+内置工具：
 
-### 内置工具
-
-所有工具都使用 OpenAI 风格的 schema 暴露给模型：
-
-- `read_file`：读取工作区内的 UTF-8 文件。
-- `ls`：列出目录中的文件和文件夹。
-- `grep`：在工作区中做字面量文本搜索。
+- `read_file`：读取 UTF-8 文件。
+- `ls`：列出目录。
+- `grep`：字面量文本搜索。
 - `write_file`：创建或覆盖文件。
-- `edit_file`：用精确字符串替换方式修改文件。
-- `bash`：在工作区或沙箱里执行 shell 命令。
-- `web_fetch`：抓取 URL 并将 HTML 转成纯文本。
-- `task`：维护一个适合多步骤任务的“整体替换”任务列表。
-- `memory_search`：搜索语义记忆和事件记忆。
-- `memory_add`：写入一条语义事实。
-- `memory_log`：记录一次已完成任务到事件记忆。
+- `edit_file`：用精确字符串替换修改文件。
+- `bash`：在工作区或 sandbox 中执行 shell 命令。
+- `web_fetch`：抓取 URL 并把 HTML 转为文本。
+- `task`：维护整体替换式任务列表。
+- `memory_search`：搜索项目记忆。
+- `memory_add`：写入语义记忆。
+- `memory_log`：记录已完成工作。
+- `list_mcp_resources` / `read_mcp_resource`：查看 MCP resources。
+- `mcp_auth`：更新 MCP server 凭证。
+- `skill`：按需加载 skill 详细指令。
 
-补充说明：
+MCP 工具会被包装成：
 
-- 工具输入都经过 Pydantic 校验。
-- `edit_file` 不是 unified diff，而是要求 `old_str` / `new_str` 精确匹配。
-- 文件操作都受工作区边界限制。
+```text
+mcp__<server>__<tool>
+```
 
-### 安全与控制
+Adapter 会从 MCP tool 的 input schema 生成可调用 schema，并通过 MCP client
+manager 路由执行。
 
-- `read_file`、`ls`、`grep` 都是只读的。
-- `write_file`、`edit_file`、`bash` 默认会要求确认。
-- hooks 可以阻止危险命令和敏感路径写入。
-- 审计日志默认开启，会以 JSONL 形式写入 `~/.miniharness/audit/`。
-- 代码安全审查 hook 已实现，但默认关闭，以免额外消耗 token。
-- 沙箱模式会把 `bash` 放在 Docker 容器中执行，默认禁网，并把工作区挂载到容器中的同一路径。
+## MCP
 
-### 记忆与会话
+MCP server 配置来源：
 
-- 核心记忆保存在项目内存目录下的 `core.md`，并会注入系统提示词。
-- 相关的语义记忆和事件记忆会按需检索并加入提示词。
-- 会话快照保存在 `~/.miniharness/sessions/<project-slug>/`。
-- 支持按会话 ID、tag 恢复，也支持继续最新会话。
+```text
+~/.miniharness/mcp.json
+<project>/.miniharness/mcp.json
+MINIHARNESS_MCP_SERVERS
+plugin mcp.json 文件
+```
 
-### 上下文管理
+同名 server 下，项目配置覆盖用户配置。项目配置是在 `mh` 启动时按进程当前
+目录发现的，所以正常用法是先 `cd` 到目标项目再启动 MiniHarness。`--cwd`
+会改变 agent 工作目录和模板展开，但不会重新加载另一个项目的
+`.miniharness/mcp.json`。JSON 文件允许 `//` 或 `#` 注释行。
 
-- 系统提示词会加入环境信息，例如操作系统、shell、日期和工作目录。
-- 当估算的上下文预算超过软上限时，会启动四层压缩流水线：
-  1. 压缩旧工具结果。
-  2. 截断超长文本块的中间部分。
-  3. 将前面的对话压成会话记忆摘要。
-  4. 必要时调用模型生成结构化压缩摘要，并保留结构化附件。
-- 默认软预算约为模型上下文窗口的 80%。
+示例：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+      "allowed_directories": ["${cwd}"]
+    },
+    "fetch": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "context7": {
+      "type": "stdio",
+      "enabled": false,
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    }
+  }
+}
+```
+
+说明：
+
+- `allowed_directories` 和 `roots` 是 filesystem MCP 根目录的别名。
+- `${cwd}`、`${workspace}`、`${project}`、`${home}` 会在运行时展开。
+- `enabled: false` 表示保留配置但不启动 server。
+- MCP 工具执行前仍会经过 MiniHarness 权限检查。
+
+## Skills
+
+Skill 是 markdown 指令文件。MiniHarness 不会把所有 skill 正文都塞进 system
+prompt，而是注入一个紧凑 skill 索引，并给模型一个 `skill` 工具。任务匹配
+某个 skill 描述时，模型再调用：
+
+```json
+{"name": "code-review"}
+```
+
+Skill 来源优先级从低到高：
+
+```text
+bundled skills
+project .miniharness/skills/<name>/SKILL.md
+project .claude/skills/<name>/SKILL.md
+user ~/.miniharness/skills/<name>/SKILL.md
+plugin skills
+```
+
+Skill frontmatter 可以设置模型是否可调用、用户是否可通过 slash command 调用。
+
+## Plugins
+
+插件发现路径：
+
+```text
+~/.miniharness/plugins/<name>/
+<project>/.miniharness/plugins/<name>/
+```
+
+插件可以包含：
+
+```text
+plugin.json      必需 manifest
+skills/          可选 skill 定义
+hooks.json       可选 hook 定义
+mcp.json         可选 MCP server 定义
+```
+
+在 REPL 中使用 `/plugins` 查看、检查、启用或禁用插件。
+
+## 权限与 Hooks
+
+MiniHarness 把 permissions 和 hooks 分成两层：
+
+- Permissions 负责回答：“当前模式下，这次工具调用是否允许？”
+- Hooks 负责回答：“这次调用是否匹配已知危险模式？”
+
+权限模式：
+
+- `default`：写文件、shell、未知 mutating 操作需要确认。
+- `accept-edits`：文件编辑自动允许，shell 仍需确认。
+- `bypass`：除硬编码关键路径外都允许。
+- `plan`：只读模式。
+
+SSH key、云凭证、部分系统文件等 critical paths 会被防御性阻断。
+
+Hooks 可阻断或确认危险 shell 命令、敏感文件访问、人类审批操作和审计事件。
+审计日志默认写入 `~/.miniharness/audit/`。
+
+## 会话
+
+会话保存在：
+
+```text
+~/.miniharness/sessions/<project-slug>/
+```
+
+REPL 支持：
+
+```text
+/sessions         列出保存的会话
+/resume [id|tag]  切换到保存的会话
+/tag <name>       给当前会话打 tag
+```
+
+会话切换会创建一个新的 `AgentLoop` 并恢复目标 conversation，而不是原地修改旧
+loop。这样 session id、上下文历史和保存目标不会互相污染。
+
+## 上下文工程
+
+System prompt 每轮会重建，包含：
+
+- 静态 agent 指令；
+- OS、shell、日期、home、工作目录；
+- 工具数量；
+- 已连接 MCP server 摘要；
+- 可用 skill 索引；
+- core memory；
+- 与当前用户输入相关的 semantic / episodic memory。
+
+工具 schema 则通过模型 API 的 tools 字段单独传入。
+
+当估算上下文超过预算时，MiniHarness 会分层压缩：
+
+1. 微压缩陈旧工具输出。
+2. 折叠超长文本块。
+3. 将早期对话总结为 session memory。
+4. 必要时调用模型生成结构化摘要，并保留 carryover 附件。
 
 ## 快速开始
 
-1. 安装依赖
+安装依赖：
 
 ```bash
-git clone <repo-url> && cd miniharness
+git clone <repo-url>
+cd miniharness
 uv sync --extra dev
 ```
 
-2. 配置凭证
-
-项目会自动加载根目录下的 `.env`。如果想使用模板，可以先复制：
+配置凭证：
 
 ```bash
 cp .env.example .env
 ```
 
-在 `.env` 或 shell 环境中设置支持的 provider key：
+设置其中之一：
 
-- `DASHSCOPE_API_KEY`：Qwen / DashScope
-- `OPENAI_API_KEY`：OpenAI
-- `MINIHARNESS_API_KEY`：兼容 API 的单 key 备用写法
+```text
+DASHSCOPE_API_KEY
+OPENAI_API_KEY
+MINIHARNESS_API_KEY
+```
 
-3. 运行代理
+运行：
 
 ```bash
 uv run mh "explain this project"
-uv run mh --dry-run "test"
-uv run mh --sandbox "list files"
-uv run mh -m gpt-4.1-mini "..."
+uv run mh
+uv run mh --cwd /path/to/project "inspect the codebase"
+uv run mh --continue
+uv run mh --resume <session-id-or-tag>
+uv run mh --dry-run "test config"
 ```
 
-如果不传 prompt，`uv run mh` 会进入交互式 REPL，并自动保存为会话。
-
-## CLI 参考
+## CLI 选项
 
 ```text
 uv run mh [PROMPT] [OPTIONS]
 
-  --cwd             工具使用的工作目录
-  --profile         Provider profile (qwen, openai, openai-compatible)
-  --model, -m       覆盖模型名
-  --base-url        覆盖 API base URL
-  --dry-run         显示解析后的配置并退出
-  --max-turns       最大代理循环回合数
-  --temperature     LLM sampling temperature
-  --top-p           LLM nucleus sampling 阈值
-  --max-tokens      最大输出 token 数
-  --sandbox/--no-sandbox
-                    启用或关闭 Docker 沙箱
-  --sandbox-image   沙箱使用的 Docker 镜像
-  --continue, -c    继续最近一次会话
-  --resume          通过 ID 或 tag 恢复会话
-  --sessions        列出已保存会话并退出
+--cwd             工具工作目录和 `${cwd}` 展开目录
+--profile         provider profile
+--model, -m       覆盖模型名
+--base-url        覆盖 API base URL
+--dry-run         显示解析后的配置并退出
+--max-turns       最大 agent 循环轮数
+--temperature     sampling temperature
+--top-p           nucleus sampling 阈值
+--max-tokens      最大输出 token
+--sandbox         启用 Docker sandbox
+--no-sandbox      关闭 Docker sandbox
+--sandbox-image   sandbox 使用的 Docker 镜像
+--continue, -c    恢复最近会话
+--resume          按 ID 或 tag 恢复会话
+--sessions        列出保存的会话并退出
 ```
 
-## 配置说明
+## REPL 命令
 
-设置按下面的优先级解析，从低到高：
+```text
+/help                 显示命令
+/exit, /quit, /q      退出
+/clear                清空会话历史
+/history              显示消息数量
+/model                显示或切换模型
+/turns                显示或设置最大循环轮数
+/permissions          切换或查看权限模式
+/temperature          显示或设置 temperature
+/top-p                显示或设置 top_p
+/max-tokens           显示或设置最大输出 token
+/memory               查看 memory
+/hooks                查看 hook 配置
+/skills               列出 skills
+/plugins [name]       列出、查看或切换 plugins
+/tools [name] [json]  列出、查看或执行 tools
+/mcp                  查看 MCP server 状态
+/sessions             列出会话
+/resume [id|tag]      恢复会话
+/tag <name>           给当前会话打 tag
+```
 
-`默认值 → 环境变量 → provider 自动检测 → CLI 覆盖`
+模型或工具正在运行时，slash command 不会被读取，直到当前 turn 返回。可以按
+`Ctrl-C` 取消当前 turn 并回到提示符。
+
+## 配置
+
+配置解析顺序：
+
+```text
+defaults
+-> user MCP config
+-> project MCP config
+-> MINIHARNESS_MCP_SERVERS
+-> environment variables
+-> provider auto-detection
+-> CLI overrides
+```
 
 常用环境变量：
 
-- `MINIHARNESS_PROFILE`：强制指定 provider profile。
-- `MINIHARNESS_MODEL`：覆盖模型名。
-- `MINIHARNESS_BASE_URL`：覆盖 API base URL。
-- `MINIHARNESS_MAX_TURNS`：最大循环回合数。
-- `MINIHARNESS_TEMPERATURE`：采样温度。
-- `MINIHARNESS_TOP_P`：nucleus sampling 阈值。
-- `MINIHARNESS_MAX_TOKENS`：输出 token 上限。
-- `MINIHARNESS_SANDBOX_ENABLED`：启用 Docker 沙箱。
-- `MINIHARNESS_SANDBOX_IMAGE`：指定沙箱镜像。
-- `DASHSCOPE_API_KEY`：Qwen / DashScope。
-- `OPENAI_API_KEY`：OpenAI。
-- `MINIHARNESS_API_KEY`：兼容接口的备用 key。
-
-## 项目结构
-
 ```text
-src/miniharness/     主要应用代码
-tests/               pytest 测试
-docs/                架构说明
-.env.example         环境变量模板
-pyproject.toml       依赖与构建配置
+MINIHARNESS_PROFILE
+MINIHARNESS_MODEL
+MINIHARNESS_BASE_URL
+MINIHARNESS_MAX_TURNS
+MINIHARNESS_TEMPERATURE
+MINIHARNESS_TOP_P
+MINIHARNESS_MAX_TOKENS
+MINIHARNESS_SANDBOX_ENABLED
+MINIHARNESS_SANDBOX_IMAGE
+DASHSCOPE_API_KEY
+OPENAI_API_KEY
+MINIHARNESS_API_KEY
 ```
 
 ## 测试
 
 ```bash
-uv run pytest -v
+uv run pytest
+uv run ruff check .
+python3 -m compileall src/miniharness
 ```
 
-当前测试覆盖了工具注册、会话持久化、沙箱路径校验、hooks、记忆存储、权限以及 provider 默认值。
+当前测试覆盖 permissions、MCP security、hooks、sessions、memory、sandbox path
+validation、tool registry、messages、skills 和 provider defaults。
 
-## 设计说明
+## 已知限制
 
-- 代码各处都读取共享的 `Settings` 对象，而不是到处直接读环境变量。
-- 工具都被拆成小类，并用 Pydantic 做输入校验和 schema 生成。
-- 文件操作严格限制在工作区边界；启用沙箱时，还会增加容器隔离。
-- hooks 和权限是两层不同的控制：hooks 负责模式匹配和阻断，权限负责按模式询问确认。
-- 记忆存储是本地轻量实现，不是向量数据库。
-
-## 局限性
-
-- 这是一个精简版 harness，不是完整的 OpenHarness 克隆。
-- `edit_file` 需要精确字符串匹配，格式略有差异就可能失败。
-- 沙箱模式依赖本机已安装 Docker，并且 Docker 需要在 `PATH` 中可用。
-- 上下文压缩是启发式的，超大对话里仍可能损失部分细节。
+- MiniHarness 是紧凑型 harness，不是完整 OpenHarness 替代品。
+- Direct MCP tools 连接后会暴露给模型。Plugin-contributed MCP tools 已按插件
+  激活状态 gating。下一步生产级优化是对大型 direct MCP/tool 集合做语义级
+  per-turn tool selection。
+- MCP schema 和 description 来自外部 server，应视为不可信 metadata。
+- `edit_file` 是精确字符串替换，不是 patch apply。
+- `/q` 只有 REPL 等待输入时才会退出；运行中请用 `Ctrl-C` 取消当前 turn。
+- Docker sandbox 需要本机安装 Docker 并可在 `PATH` 中访问。
 
 ## 许可证
 
 MIT
-

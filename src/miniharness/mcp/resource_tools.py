@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from miniharness.plugins.gating import is_mcp_server_visible
 from miniharness.tools.base import BaseTool, ToolResult
 
 
@@ -31,17 +32,28 @@ class ListMcpResourcesTool(BaseTool):
 
     input_model = InputModel
 
-    def __init__(self, *, cwd: Path, manager=None, permissions=None) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        manager=None,
+        permissions=None,
+        plugin_index: list[dict] | None = None,
+    ) -> None:
         super().__init__(cwd=cwd, permissions=permissions)
         self._manager = manager
+        self._plugin_index = plugin_index
 
     async def execute(self, arguments: InputModel) -> ToolResult:
         if self._manager is None:
             return ToolResult("MCP manager not available.", is_error=True)
 
-        statuses = self._manager.list_statuses()
+        statuses = [
+            s for s in self._manager.list_statuses()
+            if is_mcp_server_visible(s.name, self._plugin_index)
+        ]
         if not statuses:
-            return ToolResult("No MCP servers configured.")
+            return ToolResult("No active MCP servers configured.")
 
         lines: list[str] = ["**Connected MCP Servers**", ""]
         for s in statuses:
@@ -85,13 +97,26 @@ class ReadMcpResourceTool(BaseTool):
     description = "Read a resource (data) from a connected MCP server by URI."
     input_model = ReadMcpResourceInput
 
-    def __init__(self, *, cwd: Path, manager=None, permissions=None) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        manager=None,
+        permissions=None,
+        plugin_index: list[dict] | None = None,
+    ) -> None:
         super().__init__(cwd=cwd, permissions=permissions)
         self._manager = manager
+        self._plugin_index = plugin_index
 
     async def execute(self, arguments: ReadMcpResourceInput) -> ToolResult:
         if self._manager is None:
             return ToolResult("MCP manager not available.", is_error=True)
+        if not is_mcp_server_visible(arguments.server, self._plugin_index):
+            return ToolResult(
+                f"MCP server '{arguments.server}' is not active in the current runtime context.",
+                is_error=True,
+            )
 
         session = getattr(self._manager, "_sessions", {}).get(arguments.server)
         if session is None:

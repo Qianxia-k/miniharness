@@ -83,17 +83,24 @@ class McpClientManager:
                 self._statuses[name].detail = str(exc)
 
     async def close(self) -> None:
-        """Close all connections and clean up resources.
+        """Close all connections and kill subprocesses.
 
-        Handles the known `mcp` library issue where stdio transport cleanup
-        raises ``RuntimeError: Attempted to exit cancel scope...`` during
-        asyncio shutdown.
+        During asyncio shutdown, task cancellation can interrupt graceful
+        cleanup.  We catch everything to prevent noise on ``/q``.
         """
         for name, stack in list(self._stacks.items()):
+            # 1. Try graceful close via the async exit stack.
             try:
                 await stack.aclose()
             except Exception:
-                pass  # stdio cleanup is best-effort during shutdown.
+                pass
+            # 2. Fallback: force-kill any lingering subprocesses that the
+            #    mcp library's anyio task group may have left behind.
+            try:
+                await _kill_stdio_children()
+            except Exception:
+                pass
+
         self._stacks.clear()
         self._sessions.clear()
 
@@ -324,6 +331,28 @@ class _AsyncExitStackCompat:
 
 async def _noop() -> None:
     pass
+
+
+async def _kill_stdio_children() -> None:
+    """Send SIGTERM to any lingering child processes of the current process.
+
+    This is a last-resort cleanup for MCP stdio subprocesses that the
+    ``mcp`` library's anyio task group may have left running during
+    asyncio shutdown.
+    """
+    import signal
+    import psutil
+    try:
+        current = psutil.Process()
+        children = current.children(recursive=True)
+        for child in children:
+            try:
+                child.send_signal(signal.SIGTERM)
+            except psutil.NoSuchProcess:
+                pass
+    except Exception:
+        # psutil may not be installed — that's fine.
+        pass
 
 
 def _create_async_exit_stack():

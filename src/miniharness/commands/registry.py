@@ -81,6 +81,21 @@ class CommandRegistry:
             if alias not in self._handlers or self._sources.get(alias) != "builtin":
                 self._handlers[alias] = handler
 
+    def register_single_skill(self, skill: Any) -> None:
+        """Register a single ``SkillDefinition`` as a slash command."""
+        if not getattr(skill, "user_invocable", True):
+            return
+        cmd_name = getattr(skill, "command_name", None)
+        if not cmd_name or not _is_valid_command_name(cmd_name):
+            return
+        self.register(
+            cmd_name,
+            _make_skill_handler(skill),
+            description=getattr(skill, "description", ""),
+            aliases=[skill.name] if skill.name != cmd_name else None,
+            source="skill",
+        )
+
     def register_from_skills(self, skill_registry: Any) -> None:
         """Auto-register a ``/<name>`` command for each user-invocable skill."""
         for skill in skill_registry.list_skills():

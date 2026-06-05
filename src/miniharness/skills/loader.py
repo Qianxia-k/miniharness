@@ -31,42 +31,39 @@ def load_skill_registry(
     include_bundled: bool = True,
     include_project: bool = True,
     include_user: bool = True,
+    plugins: list | None = None,  # list[LoadedPlugin] | None
 ) -> SkillRegistry:
     """Load all skills into a single registry.
 
     Parameters
     ----------
     cwd:
-        Project root for discovering project skills.  ``None`` = skip
-        project discovery.
-    include_bundled:
-        Include skills bundled with MiniHarness.
-    include_project:
-        Discover skills from ``.miniharness/skills/`` directories
-        walking up from *cwd*.
-    include_user:
-        Discover skills from ``~/.miniharness/skills/``.
+        Project root.
+    include_bundled / include_project / include_user:
+        Which sources to scan.
+    plugins:
+        Optional list of ``LoadedPlugin`` objects.  Plugin skills are
+        registered AFTER user skills (plugin can override all).
 
-    Returns
-    -------
-    SkillRegistry
-        All discovered skills, with later sources overriding earlier ones.
+    Priority (low → high): bundled → project → user → plugin.
     """
     registry = SkillRegistry()
 
-    # 1. Bundled (lowest priority).
     if include_bundled:
         for skill in _load_bundled_skills():
             registry.register(skill)
-
-    # 2. Project (medium priority).
     if include_project and cwd is not None:
         for skill in _load_project_skills(cwd):
             registry.register(skill)
-
-    # 3. User (highest priority).
     if include_user:
         for skill in _load_user_skills():
+            registry.register(skill)
+
+    # Plugin skills (highest priority).
+    for plugin in (plugins or []):
+        if not getattr(plugin, "enabled", True):
+            continue
+        for skill in getattr(plugin, "skills", []):
             registry.register(skill)
 
     return registry

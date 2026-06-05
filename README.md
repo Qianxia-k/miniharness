@@ -1,208 +1,413 @@
-
 # MiniHarness
 
-MiniHarness is a teaching-first mini coding agent harness. It keeps the core pieces of an agent loop—streaming model calls, tool execution, permissions, memory, session persistence, hooks, and context compaction—while staying compact enough to read end to end.
+MiniHarness is a compact coding-agent harness built from first principles while
+tracking the architecture of larger systems such as OpenHarness. It is small
+enough to inspect end to end, but it now contains the core production concerns
+that make an agent usable in real projects: session isolation, tool schemas,
+permissions, hooks, MCP servers, skills, plugins, memory, and context
+compaction.
 
 Chinese: [README.zh-CN.md](./README.zh-CN.md)
 
-## What it does
+## What MiniHarness Is
 
-- Runs a single-agent conversation loop with async streaming output.
-- Supports Qwen (DashScope), OpenAI, and OpenAI-compatible chat endpoints.
-- Exposes workspace tools through Pydantic-validated schemas.
-- Persists sessions to disk so you can resume later.
-- Keeps lightweight project memory in local files.
-- Applies layered safety checks through permissions and hooks.
-- Can run bash commands inside an optional Docker sandbox.
+MiniHarness runs a single-agent loop:
 
-## Architecture at a glance
+```text
+user prompt
+  -> dynamic system prompt + conversation history
+  -> OpenAI-compatible streaming model call
+  -> tool calls through ToolRegistry
+  -> permission / hook checks
+  -> tool results appended to conversation
+  -> repeat until final assistant response
+```
+
+It is not a full OpenHarness clone. The goal is a readable, engineering-grade
+miniature that keeps the important boundaries explicit.
+
+## Current Capabilities
+
+- Async streaming chat completions with OpenAI-compatible APIs.
+- Provider profiles for Qwen/DashScope, OpenAI, and compatible endpoints.
+- Pydantic-validated built-in tools exposed as OpenAI tool schemas.
+- MCP client support for stdio and HTTP servers.
+- MCP filesystem root adaptation with `${cwd}` / `${workspace}` templates.
+- Registry-level permissions for MCP tools and built-in tool checks.
+- Skills loaded from bundled, project, user, and plugin sources.
+- Plugins that can contribute skills, hooks, and MCP server configs.
+- Session save, list, resume, tag, and switch without mutating the old loop.
+- Core, semantic, and episodic local memory.
+- Hook presets for dangerous commands, sensitive paths, human approval, and audit logs.
+- Context budget management and multi-tier compaction.
+- Optional Docker sandbox for shell execution.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-		U[User prompt] --> C[CLI / REPL]
-		C --> L[AgentLoop]
-		L --> P[LLMClient]
-		L --> T[ToolRegistry]
-		L --> M[Memory + Sessions]
-		L --> H[Permissions + Hooks]
-		P --> O[Streaming answer]
-		T --> O
-		M --> O
-		H --> O
+    U[User / REPL] --> CLI[CLI and Commands]
+    CLI --> L[AgentLoop]
+    L --> SP[System Prompt Assembly]
+    L --> C[Context Compiler]
+    L --> LLM[LLMClient]
+    L --> TR[ToolRegistry]
+    TR --> BT[Built-in Tools]
+    TR --> MCP[MCP Tool Adapters]
+    TR --> SK[Skill Tool]
+    L --> PERM[Permissions]
+    L --> HOOK[Hooks]
+    L --> MEM[Memory]
+    L --> SESS[Sessions]
+    L --> PLUG[Plugins]
 ```
 
-The main flow is:
+Key modules:
 
-`user input → conversation history → streaming LLM call → tool execution → repeat until final answer`
+```text
+src/miniharness/cli.py              CLI, REPL, slash commands
+src/miniharness/loop.py             AgentLoop orchestration
+src/miniharness/llm.py              OpenAI-compatible streaming client
+src/miniharness/tool_registry.py    Tool schema registry and execution
+src/miniharness/tools/              Built-in tools
+src/miniharness/mcp/                MCP config, client, adapters, resources
+src/miniharness/skills/             Skill discovery and runtime loading
+src/miniharness/plugins/            Plugin discovery and contributions
+src/miniharness/permissions.py      Permission decisions and confirmation
+src/miniharness/hooks/              Hook events, presets, executor
+src/miniharness/context/            Budgeting, carryover, compaction
+src/miniharness/sessions/           Session storage and switching
+src/miniharness/memory/             Core, semantic, episodic memory
+```
 
-## Real capabilities
+## Tool Model
 
-### Agent loop
+MiniHarness exposes tools to the model through OpenAI-style tool schemas, not
+only through prompt text.
 
-- Async streaming responses with tool-call support.
-- Retry handling for transient API errors with exponential backoff and jitter.
-- Automatic handling of prompt-too-long errors via context compaction.
-- Re-negotiates `max_tokens` when a provider rejects the requested limit.
+Built-in tools:
 
-### Tools
+- `read_file` - read a UTF-8 file.
+- `ls` - list directory entries.
+- `grep` - search literal text.
+- `write_file` - create or overwrite a file.
+- `edit_file` - replace an exact string in a file.
+- `bash` - run a shell command in the workspace or sandbox.
+- `web_fetch` - fetch a URL and convert HTML to text.
+- `task` - maintain a replace-all task list.
+- `memory_search` - search project memory.
+- `memory_add` - add a semantic memory fact.
+- `memory_log` - record completed work.
+- `list_mcp_resources` / `read_mcp_resource` - inspect MCP resources.
+- `mcp_auth` - update MCP credentials for configured servers.
+- `skill` - load detailed skill instructions on demand.
 
-Built-in tools are exposed as OpenAI-style tool schemas:
+MCP tools are wrapped as:
 
-- `read_file` — read a UTF-8 file in the workspace.
-- `ls` — list files and directories.
-- `grep` — search literal text under the workspace.
-- `write_file` — create or overwrite a file.
-- `edit_file` — replace an exact string match in a file.
-- `bash` — run shell commands in the workspace or sandbox.
-- `web_fetch` — fetch a URL and convert HTML to plain text.
-- `task` — maintain a replace-all task list for multi-step work.
-- `memory_search` — search semantic and episodic memory.
-- `memory_add` — store a semantic fact.
-- `memory_log` — record a completed task in episodic memory.
+```text
+mcp__<server>__<tool>
+```
+
+The adapter derives the callable schema from the MCP tool input schema and
+routes execution through the MCP client manager.
+
+## MCP
+
+MCP server configuration is loaded from:
+
+```text
+~/.miniharness/mcp.json
+<project>/.miniharness/mcp.json
+MINIHARNESS_MCP_SERVERS
+plugin mcp.json files
+```
+
+Project config overrides user config for the same server name. Project config is
+discovered relative to the process working directory when `mh` starts, so the
+normal workflow is to `cd` into the target project before launching MiniHarness.
+The `--cwd` flag changes the agent workspace and template expansion, but it does
+not reload another project's `.miniharness/mcp.json`. JSON files may contain
+`//` or `#` comment lines.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+      "allowed_directories": ["${cwd}"]
+    },
+    "fetch": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "context7": {
+      "type": "stdio",
+      "enabled": false,
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    }
+  }
+}
+```
 
 Notes:
 
-- Tool inputs are validated with Pydantic.
-- `edit_file` uses exact `old_str` / `new_str` replacement, not unified diffs.
-- File operations stay inside the workspace boundary.
+- `allowed_directories` and `roots` are aliases for filesystem MCP roots.
+- `${cwd}`, `${workspace}`, `${project}`, and `${home}` are expanded at runtime.
+- `enabled: false` keeps a server configured but prevents startup.
+- MCP tools still pass through MiniHarness permission checks before execution.
 
-### Safety and control
+## Skills
 
-- `read_file`, `ls`, and `grep` are read-only.
-- `write_file`, `edit_file`, and `bash` ask for confirmation by default.
-- Hooks can block dangerous commands and sensitive file paths.
-- Audit logging is enabled by default and writes JSONL entries under `~/.miniharness/audit/`.
-- Optional code-security review hooks are available, but disabled by default.
-- The sandbox mode runs `bash` inside Docker with `--network none` and the workspace bind-mounted at the same path.
+Skills are markdown instruction files. MiniHarness does not inject every skill
+body into the system prompt. It injects a compact skill index and gives the
+model a single `skill` tool. When a task matches a skill description, the model
+loads the full skill content with:
 
-### Memory and sessions
+```json
+{"name": "code-review"}
+```
 
-- Core memory lives in `core.md` under the project memory directory and is injected into the system prompt.
-- Relevant semantic and episodic memories are retrieved on demand and added to the prompt.
-- Session snapshots are stored under `~/.miniharness/sessions/<project-slug>/`.
-- You can list sessions, resume by ID or tag, and continue the latest session.
+Skill sources, from lower to higher priority:
 
-### Context management
+```text
+bundled skills
+project .miniharness/skills/<name>/SKILL.md
+project .claude/skills/<name>/SKILL.md
+user ~/.miniharness/skills/<name>/SKILL.md
+plugin skills
+```
 
-- The system prompt includes environment details such as OS, shell, date, and working directory.
-- A 4-tier compaction pipeline reduces context when the estimated budget is exceeded:
-	1. Microcompact old tool results.
-	2. Collapse the middle of oversized text blocks.
-	3. Condense earlier turns into session memory.
-	4. Fall back to an LLM-generated compact summary with structured attachments.
-- The soft budget defaults to 80% of the model context window.
+Skill frontmatter can mark a skill as model-invocable or user-only.
 
-## Quick start
+## Plugins
 
-1. Install dependencies
+Plugins are discovered from:
+
+```text
+~/.miniharness/plugins/<name>/
+<project>/.miniharness/plugins/<name>/
+```
+
+A plugin can contain:
+
+```text
+plugin.json      required manifest
+skills/          optional skill definitions
+hooks.json       optional hook definitions
+mcp.json         optional MCP server definitions
+```
+
+Use `/plugins` in the REPL to list, inspect, enable, or disable plugins.
+
+## Permissions And Hooks
+
+MiniHarness separates permissions from hooks:
+
+- Permissions answer: "Should this tool invocation be allowed in this mode?"
+- Hooks answer: "Does this invocation match a known dangerous pattern?"
+
+Permission modes:
+
+- `default` - confirm write, shell, and unknown mutating operations.
+- `accept-edits` - allow file edits, confirm shell commands.
+- `bypass` - allow operations except hard-denied critical paths.
+- `plan` - read-only mode.
+
+Critical paths such as SSH keys, cloud credentials, and selected system files
+are blocked as a defense-in-depth layer.
+
+Hooks can block or confirm dangerous shell commands, sensitive file access,
+human-approval operations, and audit events. Audit logs are written under
+`~/.miniharness/audit/` by default.
+
+## Sessions
+
+Sessions are stored under:
+
+```text
+~/.miniharness/sessions/<project-slug>/
+```
+
+The REPL supports:
+
+```text
+/sessions         list saved sessions
+/resume [id|tag]  switch to a saved session
+/tag <name>       tag the current session
+```
+
+Session switching creates a fresh `AgentLoop` with the target conversation
+instead of mutating the old loop in place. This keeps session IDs, conversation
+history, and save targets isolated.
+
+## Context Engineering
+
+The system prompt is rebuilt each turn with:
+
+- static agent instructions,
+- OS, shell, date, home, and working directory,
+- tool count,
+- connected MCP server summary,
+- available skill index,
+- core memory,
+- relevant semantic and episodic memories.
+
+The tool schemas are passed separately through the model API.
+
+When the estimated context exceeds the configured budget, MiniHarness compacts
+in tiers:
+
+1. Microcompact stale tool output.
+2. Collapse oversized text blocks.
+3. Summarize earlier turns into session memory.
+4. Fall back to an LLM-generated structured summary with carryover attachments.
+
+## Quick Start
+
+Install dependencies:
 
 ```bash
-git clone <repo-url> && cd miniharness
+git clone <repo-url>
+cd miniharness
 uv sync --extra dev
 ```
 
-2. Configure credentials
-
-The project loads `.env` automatically. Copy `.env.example` if you want a template:
+Configure credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-Set one of the supported provider keys in `.env` or your shell environment:
+Set one of:
 
-- `DASHSCOPE_API_KEY` for Qwen / DashScope
-- `OPENAI_API_KEY` for OpenAI
-- `MINIHARNESS_API_KEY` for an OpenAI-compatible endpoint that uses a single key
+```text
+DASHSCOPE_API_KEY
+OPENAI_API_KEY
+MINIHARNESS_API_KEY
+```
 
-3. Run the agent
+Run:
 
 ```bash
 uv run mh "explain this project"
-uv run mh --dry-run "test"
-uv run mh --sandbox "list files"
-uv run mh -m gpt-4.1-mini "..."
+uv run mh
+uv run mh --cwd /path/to/project "inspect the codebase"
+uv run mh --continue
+uv run mh --resume <session-id-or-tag>
+uv run mh --dry-run "test config"
 ```
 
-If you run `uv run mh` without a prompt, MiniHarness opens an interactive REPL and saves turns as sessions.
-
-## CLI reference
+## CLI Options
 
 ```text
 uv run mh [PROMPT] [OPTIONS]
 
-	--cwd             Working directory for tools
-	--profile         Provider profile (qwen, openai, openai-compatible)
-	--model, -m       Override model name
-	--base-url        Override API base URL
-	--dry-run         Show resolved settings and exit
-	--max-turns       Maximum agent loop turns
-	--temperature     LLM sampling temperature
-	--top-p           LLM nucleus sampling threshold
-	--max-tokens      Maximum output tokens
-	--sandbox/--no-sandbox
-										Enable or disable Docker sandbox
-	--sandbox-image   Docker image for sandbox
-	--continue, -c    Resume the most recent session
-	--resume          Resume a session by ID or tag
-	--sessions        List saved sessions and exit
+--cwd             working directory for tools and `${cwd}` expansion
+--profile         provider profile
+--model, -m       override model name
+--base-url        override API base URL
+--dry-run         print resolved settings and exit
+--max-turns       maximum agent loop turns
+--temperature     sampling temperature
+--top-p           nucleus sampling threshold
+--max-tokens      maximum output tokens
+--sandbox         enable Docker sandbox
+--no-sandbox      disable Docker sandbox
+--sandbox-image   Docker image for sandbox
+--continue, -c    resume the most recent session
+--resume          resume a session by ID or tag
+--sessions        list saved sessions and exit
 ```
+
+## REPL Commands
+
+```text
+/help                 show commands
+/exit, /quit, /q      exit
+/clear                clear conversation history
+/history              show message count
+/model                show or switch model
+/turns                show or set max turns
+/permissions          cycle or inspect permission mode
+/temperature          show or set temperature
+/top-p                show or set top_p
+/max-tokens           show or set max output tokens
+/memory               inspect memory
+/hooks                show hook configuration
+/skills               list skills
+/plugins [name]       list, inspect, or toggle plugins
+/tools [name] [json]  list, inspect, or execute tools
+/mcp                  show MCP server status
+/sessions             list sessions
+/resume [id|tag]      resume session
+/tag <name>           tag current session
+```
+
+During a running model/tool turn, slash commands are not read until the turn
+returns. Press `Ctrl-C` to cancel the current turn and return to the prompt.
 
 ## Configuration
 
-Settings are resolved in this order, from lowest to highest priority:
+Settings are resolved in this order:
 
-`defaults → environment variables → provider auto-detection → CLI overrides`
+```text
+defaults
+-> user MCP config
+-> project MCP config
+-> MINIHARNESS_MCP_SERVERS
+-> environment variables
+-> provider auto-detection
+-> CLI overrides
+```
 
 Common environment variables:
 
-- `MINIHARNESS_PROFILE` — force a provider profile.
-- `MINIHARNESS_MODEL` — override the model name.
-- `MINIHARNESS_BASE_URL` — override the API base URL.
-- `MINIHARNESS_MAX_TURNS` — max loop turns.
-- `MINIHARNESS_TEMPERATURE` — sampling temperature.
-- `MINIHARNESS_TOP_P` — nucleus sampling threshold.
-- `MINIHARNESS_MAX_TOKENS` — output token cap.
-- `MINIHARNESS_SANDBOX_ENABLED` — enable Docker sandbox.
-- `MINIHARNESS_SANDBOX_IMAGE` — Docker image to use.
-- `DASHSCOPE_API_KEY` — Qwen / DashScope.
-- `OPENAI_API_KEY` — OpenAI.
-- `MINIHARNESS_API_KEY` — fallback key for compatible endpoints.
-
-## Project layout
-
 ```text
-src/miniharness/     application code
-tests/               pytest coverage for core behavior
-docs/                architecture notes
-.env.example         environment template
-pyproject.toml       dependencies and build configuration
+MINIHARNESS_PROFILE
+MINIHARNESS_MODEL
+MINIHARNESS_BASE_URL
+MINIHARNESS_MAX_TURNS
+MINIHARNESS_TEMPERATURE
+MINIHARNESS_TOP_P
+MINIHARNESS_MAX_TOKENS
+MINIHARNESS_SANDBOX_ENABLED
+MINIHARNESS_SANDBOX_IMAGE
+DASHSCOPE_API_KEY
+OPENAI_API_KEY
+MINIHARNESS_API_KEY
 ```
 
 ## Testing
 
 ```bash
-uv run pytest -v
+uv run pytest
+uv run ruff check .
+python3 -m compileall src/miniharness
 ```
 
-The test suite currently covers the tool registry, sessions, sandbox path validation, hooks, memory storage, permissions, and provider defaults.
+The current test suite covers permissions, MCP security behavior, hooks,
+sessions, memory, sandbox path validation, tool registry behavior, messages,
+skills, and provider defaults.
 
-## Design notes
+## Known Limits
 
-- MiniHarness uses a shared `Settings` object instead of raw environment reads throughout the codebase.
-- Tools are implemented as small classes with validated inputs and OpenAI-style schemas.
-- Workspace boundaries are enforced for file operations, and sandbox mode adds container isolation.
-- Hooks and permissions are separate layers: hooks are pattern-driven, while permissions handle mode-based confirmation.
-- Memory storage is local and lightweight; it is not a vector database.
-
-## Limitations
-
-- This is a compact harness, not a full OpenHarness clone.
-- `edit_file` requires an exact string match, so small formatting differences can cause an edit to fail.
-- Sandbox mode requires Docker to be installed and available on `PATH`.
-- Context compaction is heuristic and can still lose detail if the conversation is very large.
+- MiniHarness is a compact harness, not a full OpenHarness replacement.
+- Direct MCP tools are exposed once connected. Plugin-contributed MCP tools are
+  gated by plugin activation. A future production step is semantic per-turn tool
+  selection for large direct MCP/tool sets.
+- MCP schemas and descriptions come from external servers and should be treated
+  as untrusted metadata.
+- `edit_file` uses exact string replacement, not patch application.
+- `/q` exits only when the REPL is waiting for input; use `Ctrl-C` to cancel an
+  active model/tool turn.
+- Docker sandboxing requires Docker on `PATH`.
 
 ## License
 
 MIT
-

@@ -46,6 +46,34 @@ class HookRegistry:
         """Register multiple hooks for an event."""
         self._hooks[event].extend(hooks)
 
+    def register_from_dict(self, event_name: str, hook_dict: dict) -> None:
+        """Register a hook from a raw dict (used by plugin loading).
+
+        The dict must have a ``"type"`` field.  Invalid dicts are silently
+        skipped.  Unknown event names are also skipped.
+        """
+        from miniharness.hooks.schemas import (
+            CommandHookDefinition,
+            PromptHookDefinition,
+        )
+        try:
+            event = HookEvent(event_name)
+        except ValueError:
+            return
+
+        hook_type = hook_dict.get("type", "")
+        try:
+            if hook_type == "command":
+                hook = CommandHookDefinition(**hook_dict)
+            elif hook_type == "prompt":
+                hook = PromptHookDefinition(**hook_dict)
+            else:
+                return
+        except Exception:
+            return
+
+        self._hooks[event].append(hook)
+
     def get(self, event: HookEvent) -> list[HookDefinition]:
         """Return all hooks registered for *event*.
 
@@ -86,27 +114,20 @@ class HookRegistry:
 # ---------------------------------------------------------------------------
 
 
-def load_hook_registry(hooks_config: dict[str, list[dict[str, Any]]] | None = None) -> HookRegistry:
-    """Build a ``HookRegistry`` from a configuration dict.
+def load_hook_registry(
+    hooks_config: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    plugins: list | None = None,  # list[LoadedPlugin] | None
+) -> HookRegistry:
+    """Build a ``HookRegistry`` from settings + plugins.
 
     Parameters
     ----------
     hooks_config:
-        A dict mapping event-name strings to lists of hook dicts.
-        Example::
-
-            {
-                "pre_tool_use": [
-                    {"type": "command", "command": "echo audit $TOOL_NAME"},
-                    {"type": "prompt", "prompt": "Is this safe?"},
-                ],
-                "session_start": [
-                    {"type": "command", "command": "notify-send 'Agent started'"},
-                ],
-            }
-
-        Invalid event names are silently skipped.
-        Invalid hook dicts raise Pydantic ``ValidationError``.
+        Dict from ``settings.hooks`` or ``_build_hooks_config()``.
+    plugins:
+        Optional list of ``LoadedPlugin`` objects.  Plugin hooks are
+        registered AFTER settings hooks (settings can override).
 
     Returns
     -------
@@ -126,23 +147,37 @@ def load_hook_registry(hooks_config: dict[str, list[dict[str, Any]]] | None = No
 
     registry = HookRegistry()
 
-    if not hooks_config:
-        return registry
+    # Settings hooks.
+    if hooks_config:
+        for raw_event, hook_dicts in hooks_config.items():
+            try:
+                event = HookEvent(raw_event)
+            except ValueError:
+                continue
+            for hd in hook_dicts:
+                hook_type = hd.get("type", "")
+                model_cls = _HOOK_TYPE_MAP.get(hook_type)
+                if model_cls is None:
+                    continue
+                try:
+                    hook = model_cls(**hd)
+                    registry.register(event, hook)
+                except Exception:
+                    continue
 
-    for raw_event, hook_dicts in hooks_config.items():
-        # Validate event name.
-        try:
-            event = HookEvent(raw_event)
-        except ValueError:
-            continue  # silently skip unknown events
-
-        for hd in hook_dicts:
-            hook_type = hd.get("type", "")
-            model_cls = _HOOK_TYPE_MAP.get(hook_type)
-            if model_cls is None:
-                continue  # silently skip unknown hook types
-
-            hook = model_cls(**hd)
-            registry.register(event, hook)
+    # Plugin hooks.
+    for plugin in (plugins or []):
+        if not getattr(plugin, "enabled", True):
+            continue
+        for event_name, hooks in getattr(plugin, "hooks", {}).items():
+            try:
+                event = HookEvent(event_name)
+            except ValueError:
+                continue
+            for h in hooks:
+                try:
+                    registry.register_from_dict(event_name, h)
+                except Exception:
+                    continue
 
     return registry

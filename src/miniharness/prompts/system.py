@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import os
 import platform
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from miniharness.memory.episodic import EpisodicStore
 from miniharness.memory.semantic import SemanticStore
+from miniharness.plugins.gating import is_mcp_server_visible
 
 # ---------------------------------------------------------------------------
 # Environment info
@@ -64,7 +65,6 @@ def get_environment_info(*, cwd: Path | None = None) -> str:
         os_name = system
 
     shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     local_date = datetime.now().strftime("%Y-%m-%d")
 
     lines = [
@@ -76,7 +76,7 @@ def get_environment_info(*, cwd: Path | None = None) -> str:
         f"Shell: {shell}",
         f"Workspace Folder: {cwd_str}",
         f"Current date: {local_date}",
-        f"Note: Prefer using absolute paths over relative paths as tool call args when possible.",
+        "Note: Prefer using absolute paths over relative paths as tool call args when possible.",
         "</env>",
     ]
     return "\n".join(lines)
@@ -191,6 +191,7 @@ def assemble_system_prompt(
     tool_count: int = 0,
     skill_registry=None,  # SkillRegistry | None
     mcp_manager=None,     # McpClientManager | None
+    plugin_index=None,    # list[dict] — [{name, description, active, skills}]
 ) -> str:
     """Assemble the full system prompt for a turn.
 
@@ -236,15 +237,34 @@ def assemble_system_prompt(
 
     # 2b. MCP server status (if any connected).
     if mcp_manager is not None:
-        mcp_section = _build_mcp_section(mcp_manager)
+        mcp_section = _build_mcp_section(mcp_manager, plugin_index=plugin_index)
         if mcp_section:
             sections.append(mcp_section)
 
-    # 2c. Available Skills.
+    # 2c. Available Skills (direct skills + activated plugin skills).
     if skill_registry is not None:
-        skills_section = _build_skills_section(skill_registry)
+        active_plugin_names = {
+            p["name"] for p in (plugin_index or []) if p.get("active")
+        }
+        skills_section = _build_skills_section(skill_registry, exclude_inactive_plugins=active_plugin_names)
         if skills_section:
             sections.append(skills_section)
+
+    # 2d. Available Plugins (not yet activated — show descriptions only).
+    if plugin_index:
+        inactive = [p for p in plugin_index if not p.get("active")]
+        if inactive:
+            lines = [
+                "# Available Plugins",
+                "",
+                "You have a `plugin` tool.  Activate a plugin to see its skills "
+                "and plugin-contributed MCP tools.",
+                "",
+            ]
+            for p in inactive:
+                desc = p.get("description", "").strip()
+                lines.append(f"- **{p['name']}**: {desc}" if desc else f"- **{p['name']}**")
+            sections.append("\n".join(lines))
 
     # 3. Core Memory (stable context, always injected).
     if core_memory_text:
@@ -262,14 +282,17 @@ def assemble_system_prompt(
     return "\n\n".join(sections)
 
 
-def _build_mcp_section(mcp_manager) -> str | None:
+def _build_mcp_section(mcp_manager, *, plugin_index: list[dict] | None = None) -> str | None:
     """Build the 'MCP Servers' block for the system prompt.
 
     Tells the model about connected MCP servers and their tools so it
     knows what the ``mcp__<server>__<tool>`` functions are for.
     """
     statuses = mcp_manager.list_statuses()
-    connected = [s for s in statuses if s.state == "connected"]
+    connected = [
+        s for s in statuses
+        if s.state == "connected" and is_mcp_server_visible(s.name, plugin_index)
+    ]
     if not connected:
         return None
 
@@ -289,12 +312,27 @@ def _build_mcp_section(mcp_manager) -> str | None:
     return "\n".join(lines)
 
 
-def _build_skills_section(registry) -> str | None:
+def _build_skills_section(
+    registry,
+    *,
+    exclude_inactive_plugins: set[str] | None = None,
+) -> str | None:
     """Build the 'Available Skills' block for the system prompt.
 
     Only lists skills the model is allowed to load (model_invocable=True).
+    Plugin skills from NOT-YET-ACTIVATED plugins are hidden to save tokens
+    — the model only sees plugin descriptions until activation.
     """
     skills = registry.model_invocable_skills()
+
+    # Filter: hide plugin skills from inactive plugins.
+    if exclude_inactive_plugins is not None:
+        active_set = exclude_inactive_plugins
+        skills = [
+            s for s in skills
+            if s.source != "plugin" or s.source == "plugin" and _plugin_name_of(s) in active_set
+        ]
+
     if not skills:
         return None
 
@@ -310,3 +348,23 @@ def _build_skills_section(registry) -> str | None:
         lines.append(f"- **{skill.name}**: {skill.description}")
 
     return "\n".join(lines)
+
+
+def _plugin_name_of(skill) -> str:
+    """Extract plugin name from a plugin skill's base_dir path.
+
+    Plugin skills are in ``plugins/<name>/skills/<skill>/SKILL.md``.
+    The plugin name is the directory after ``plugins/``.
+    """
+    import os
+    path = getattr(skill, "path", "") or ""
+    parts = path.split(os.sep)
+    # Walk backwards: .../plugins/<plugin-name>/skills/<skill-name>/SKILL.md
+    try:
+        # Find "plugins" in path and return the next segment.
+        for i, p in enumerate(parts):
+            if p == "plugins" and i + 1 < len(parts):
+                return parts[i + 1]
+    except (ValueError, IndexError):
+        pass
+    return ""

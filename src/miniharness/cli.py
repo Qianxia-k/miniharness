@@ -23,7 +23,7 @@ from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
     cmd_clear, cmd_exit, cmd_help, cmd_history, cmd_hooks,
     cmd_max_tokens, cmd_mcp, cmd_memory, cmd_model, cmd_permissions,
-    cmd_skills, cmd_temperature, cmd_tools, cmd_top_p, cmd_turns,
+    cmd_plugins, cmd_skills, cmd_temperature, cmd_tools, cmd_top_p, cmd_turns,
 )
 from miniharness.commands.types import CommandResult
 from miniharness.config import apply_cli_overrides, load_settings
@@ -345,16 +345,24 @@ async def _run_repl(
                 save_loop_snapshot(loop)
     finally:
         # Close MCP connections before event loop tears down.
+        # Use shield + timeout to prevent cancellation from breaking cleanup.
         mcp = getattr(loop, '_mcp_manager', None)
         if mcp is not None:
             try:
-                await mcp.close()
-            except Exception:
+                await asyncio.shield(
+                    asyncio.wait_for(mcp.close(), timeout=5.0)
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
 
         if settings.sandbox.enabled:
             from miniharness.sandbox import stop_sandbox
-            await stop_sandbox()
+            try:
+                await asyncio.shield(
+                    asyncio.wait_for(stop_sandbox(), timeout=3.0)
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
 
 
 async def _run_repl_turn(loop: AgentLoop, prompt: str) -> bool:
@@ -408,6 +416,8 @@ def _build_command_registry(loop: AgentLoop) -> CommandRegistry:
                  description="Show hook configuration", source="builtin")
     reg.register("skills", cmd_skills,
                  description="List available skills", source="builtin")
+    reg.register("plugins", cmd_plugins,
+                 description="List, inspect, or toggle plugins", source="builtin")
     reg.register("tools", cmd_tools,
                  description="List, describe, or execute tools", source="builtin")
     reg.register("mcp", cmd_mcp,

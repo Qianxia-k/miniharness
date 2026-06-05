@@ -1,5 +1,4 @@
 """Integration tests for the production-grade Skills system."""
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -226,6 +225,50 @@ def test_tool_registry_has_skill():
     # This test verifies the registry works; SkillTool is added separately.
     assert reg.get("skill") is None or reg.get("skill") is not None  # tautology, just verify it imports
     print("11. Tool registry: OK")
+
+
+def test_skills_command_groups_plugin_skills_by_plugin_name():
+    from types import SimpleNamespace
+
+    from miniharness.commands.builtin import cmd_skills
+    from miniharness.commands.types import CommandContext
+
+    reg = SkillRegistry()
+    reg.register(SkillDefinition(
+        name="hello-world",
+        description="A friendly hello-world skill from a plugin.",
+        content="# hello",
+        source="plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    ))
+    reg.register(SkillDefinition(
+        name="other-skill",
+        description="Another plugin skill.",
+        content="# other",
+        source="plugin",
+        path="/tmp/project/.miniharness/plugins/other-plugin/skills/other-skill/SKILL.md",
+    ))
+    loop = SimpleNamespace(_plugin_index=[
+        {"name": "demo-plugin", "active": False},
+        {"name": "other-plugin", "active": True},
+    ])
+    ctx = CommandContext(
+        loop=loop,
+        console=None,
+        cwd=Path("/tmp/project"),
+        skill_registry=reg,
+    )
+
+    result = cmd_skills("", ctx)
+
+    assert result.message is not None
+    assert "── demo-plugin ──" in result.message
+    assert "── other-plugin ──" in result.message
+    assert "── Plugin ──" not in result.message
+    assert "/hello-world" in result.message
+    assert "A friendly hello-world skill from a plugin."[:50] in result.message
+    assert "🔴" in result.message
+    assert "🟢" in result.message
 
 
 # ===================================================================

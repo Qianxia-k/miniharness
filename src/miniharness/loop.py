@@ -90,6 +90,9 @@ from miniharness.mcp import McpClientManager, load_mcp_server_configs
 from miniharness.memory.core import CoreMemory
 from miniharness.messages import Conversation, Message
 from miniharness.permissions import PermissionChecker
+from miniharness.plugins import load_plugins
+from miniharness.plugins.gating import is_tool_visible
+from miniharness.plugins.tool import PluginTool
 from miniharness.prompts.system import assemble_system_prompt
 from miniharness.providers import get_profile
 from miniharness.skills import SkillTool, load_skill_registry
@@ -181,23 +184,44 @@ class AgentLoop:
         )
         self.permissions = PermissionChecker(cwd=cwd)
 
-        # ── MCP (Model Context Protocol) — created before tools so
-        #     it can be passed to create_default_registry. ──────────
-        self._mcp_manager = McpClientManager(
-            load_mcp_server_configs(settings, cwd=cwd)
-        )
+        # ── Plugins: load first — all downstream loaders consume them ──
+        self._plugins = load_plugins(settings, cwd=cwd)
 
+        # ── Plugin visibility index (for prompt/tool gating) ─────────
+        self._plugin_index: list[dict] = []
+        for plugin in self._plugins:
+            entry = {
+                "name": plugin.name,
+                "description": plugin.description or "",
+                "active": False,
+                "skills": plugin.skills,
+                "_plugin": plugin,  # full LoadedPlugin for hooks/MCP introspection
+            }
+            self._plugin_index.append(entry)
+
+        # ── MCP: settings + plugins → manager → tool adapters ────────
+        self._mcp_manager = McpClientManager(
+            load_mcp_server_configs(settings, cwd=cwd, plugins=self._plugins)
+        )
         self.tools = create_default_registry(
             cwd=cwd, permissions=self.permissions,
             mcp_manager=self._mcp_manager,
+            is_tool_enabled=self._is_tool_enabled,
+            plugin_index=self._plugin_index,
         )
 
-        # ── Skills system ────────────────────────────────────────────
-        self.skill_registry = load_skill_registry(cwd=cwd)
+        # ── Skills: bundled + project + user + plugins → registry ────
+        self.skill_registry = load_skill_registry(cwd=cwd, plugins=self._plugins)
         self.tools.register(SkillTool(
             cwd=cwd,
             registry=self.skill_registry,
             permissions=self.permissions,
+        ))
+
+        self.tools.register(PluginTool(
+            cwd=cwd,
+            permissions=self.permissions,
+            plugin_index=self._plugin_index,
         ))
 
         self.budget = ContextBudget.for_model(
@@ -210,9 +234,10 @@ class AgentLoop:
             keep_last_n_turns=settings.keep_last_n_turns,
         )
 
-        # ── Hook system (lifecycle extension points) ──────────────────
-        hooks_config = _build_hooks_config(settings.hooks)
-        self.hook_registry = load_hook_registry(hooks_config)
+        # ── Hooks: settings + plugins → registry → executor ──────────
+        self.hook_registry = load_hook_registry(
+            _build_hooks_config(settings.hooks), plugins=self._plugins,
+        )
         self._hook_executor = HookExecutor(
             registry=self.hook_registry,
             context=HookExecutionContext(
@@ -505,7 +530,12 @@ class AgentLoop:
             tool_count=len(self.tools._tools),
             skill_registry=self.skill_registry,
             mcp_manager=self._mcp_manager,
+            plugin_index=self._plugin_index,
         )
+
+    def _is_tool_enabled(self, name: str, tool) -> bool:
+        """Runtime tool gating for plugin-contributed capabilities."""
+        return is_tool_visible(tool, self._plugin_index)
 
     def _refresh_system_prompt(self, *, user_query: str = "") -> None:
         """Update the system prompt in-place for a new turn.

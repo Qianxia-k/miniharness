@@ -6,7 +6,7 @@ The registry is the bridge between model-facing schemas and Python tool code.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from miniharness.permissions import PermissionChecker
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
@@ -28,9 +28,15 @@ from miniharness.tools.edit_file import EditFileTool
 class ToolRegistry:
     """Keep track of available tools."""
 
-    def __init__(self, *, permissions: PermissionChecker | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        permissions: PermissionChecker | None = None,
+        is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
+    ) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._permissions = permissions
+        self._is_tool_enabled = is_tool_enabled
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
@@ -39,12 +45,21 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def to_openai_tools(self) -> list[dict[str, Any]]:
-        return [tool.to_openai_tool() for tool in self._tools.values()]
+        return [
+            tool.to_openai_tool()
+            for name, tool in self._tools.items()
+            if self._tool_enabled(name, tool)
+        ]
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         tool = self.get(name)
         if tool is None:
             return ToolResult(output=f"Unknown tool: {name}", is_error=True)
+        if not self._tool_enabled(name, tool):
+            return ToolResult(
+                output=f"Tool '{name}' is not active in the current runtime context.",
+                is_error=True,
+            )
         try:
             parsed = tool.input_model(**arguments)
         except Exception as exc:
@@ -55,6 +70,14 @@ class ToolRegistry:
             if permission_result is not None:
                 return permission_result
         return await tool.execute(parsed)
+
+    def _tool_enabled(self, name: str, tool: BaseTool) -> bool:
+        if self._is_tool_enabled is None:
+            return True
+        try:
+            return bool(self._is_tool_enabled(name, tool))
+        except Exception:
+            return False
 
     def _check_permission_requests(
         self,
@@ -123,6 +146,8 @@ def create_default_registry(
     cwd: Path,
     permissions: PermissionChecker,
     mcp_manager=None,  # McpClientManager | None
+    is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
+    plugin_index: list[dict] | None = None,
 ) -> ToolRegistry:
     """Create a ToolRegistry with all built-in tools + MCP adapters.
 
@@ -136,7 +161,7 @@ def create_default_registry(
         Optional McpClientManager.  If provided, resource tools and MCP
         tool adapters are registered automatically.
     """
-    registry = ToolRegistry(permissions=permissions)
+    registry = ToolRegistry(permissions=permissions, is_tool_enabled=is_tool_enabled)
     # Read-only tools
     registry.register(ReadFileTool(cwd=cwd, permissions=permissions))
     registry.register(LsTool(cwd=cwd, permissions=permissions))
@@ -164,10 +189,12 @@ def create_default_registry(
         from miniharness.mcp.tool_adapter import McpToolAdapter
 
         registry.register(ListMcpResourcesTool(
-            cwd=cwd, manager=mcp_manager, permissions=permissions
+            cwd=cwd, manager=mcp_manager, permissions=permissions,
+            plugin_index=plugin_index,
         ))
         registry.register(ReadMcpResourceTool(
-            cwd=cwd, manager=mcp_manager, permissions=permissions
+            cwd=cwd, manager=mcp_manager, permissions=permissions,
+            plugin_index=plugin_index,
         ))
         registry.register(McpAuthTool(
             cwd=cwd, manager=mcp_manager, permissions=permissions
