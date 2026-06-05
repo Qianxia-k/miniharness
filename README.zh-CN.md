@@ -1,9 +1,8 @@
 # MiniHarness
 
-MiniHarness 是一个从零构建的紧凑型 coding-agent harness。它参考
-OpenHarness 这类更完整系统的架构边界，但保持代码规模可读；同时已经覆盖
-真实项目中 agent 必须面对的核心问题：会话隔离、工具 schema、权限、hooks、
-MCP、skills、plugins、记忆和上下文压缩。
+MiniHarness 是一个从零构建的coding-agent harness。它保持代码规模
+可读，同时明确保留真实项目中 agent 必须面对的工程边界：会话隔离、工具
+schema、权限、hooks、MCP、skills、plugins、记忆和上下文压缩。
 
 English: [README.md](./README.md)
 
@@ -21,7 +20,7 @@ MiniHarness 运行一个单 agent 循环：
   -> 循环直到最终 assistant 响应
 ```
 
-它不是完整 OpenHarness 克隆。它的目标是一个可读、可验证、工程边界清晰的
+它不是完整 agent 平台。它的目标是一个可读、可验证、工程边界清晰的
 miniature。
 
 ## 当前能力
@@ -387,7 +386,7 @@ validation、tool registry、messages、skills 和 provider defaults。
 
 ## 已知限制
 
-- MiniHarness 是紧凑型 harness，不是完整 OpenHarness 替代品。
+- MiniHarness 是紧凑型 harness，不是完整 agent 平台替代品。
 - Direct MCP tools 连接后会暴露给模型。Plugin-contributed MCP tools 已按插件
   激活状态 gating。下一步生产级优化是对大型 direct MCP/tool 集合做语义级
   per-turn tool selection。

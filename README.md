@@ -1,13 +1,12 @@
 # MiniHarness
 
 MiniHarness is a compact coding-agent harness built from first principles while
-tracking the architecture of larger systems such as OpenHarness. It is small
-enough to inspect end to end, but it now contains the core production concerns
-that make an agent usable in real projects: session isolation, tool schemas,
-permissions, hooks, MCP servers, skills, plugins, memory, and context
-compaction.
+keeping the important production boundaries explicit. It is small enough to
+inspect end to end, but it now contains the core concerns that make an agent
+usable in real projects: session isolation, tool schemas, permissions, hooks,
+MCP servers, skills, plugins, memory, and context compaction.
 
-Chinese: [README.zh-CN.md](./README.zh-CN.md)
+中文: [README.zh-CN.md](./README.zh-CN.md)
 
 ## What MiniHarness Is
 
@@ -23,8 +22,8 @@ user prompt
   -> repeat until final assistant response
 ```
 
-It is not a full OpenHarness clone. The goal is a readable, engineering-grade
-miniature that keeps the important boundaries explicit.
+It is not intended to be a full agent platform. The goal is a readable,
+engineering-grade miniature that keeps the important boundaries explicit.
 
 ## Current Capabilities
 
@@ -397,7 +396,7 @@ skills, and provider defaults.
 
 ## Known Limits
 
-- MiniHarness is a compact harness, not a full OpenHarness replacement.
+- MiniHarness is a compact harness, not a full agent platform replacement.
 - Direct MCP tools are exposed once connected. Plugin-contributed MCP tools are
   gated by plugin activation. A future production step is semantic per-turn tool
   selection for large direct MCP/tool sets.
