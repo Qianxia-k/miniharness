@@ -14,6 +14,11 @@ def active_plugin_names(plugin_index: list[dict] | None) -> set[str]:
     }
 
 
+def is_plugin_active(plugin_name: str, plugin_index: list[dict] | None) -> bool:
+    """Return whether a plugin is active in the runtime context."""
+    return plugin_name in active_plugin_names(plugin_index)
+
+
 def plugin_name_for_mcp_server(server_name: str) -> str | None:
     """Return the plugin name for a namespaced MCP server.
 

@@ -239,6 +239,7 @@ def test_skills_command_groups_plugin_skills_by_plugin_name():
         description="A friendly hello-world skill from a plugin.",
         content="# hello",
         source="plugin",
+        plugin_name="demo-plugin",
         path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
     ))
     reg.register(SkillDefinition(
@@ -246,6 +247,7 @@ def test_skills_command_groups_plugin_skills_by_plugin_name():
         description="Another plugin skill.",
         content="# other",
         source="plugin",
+        plugin_name="other-plugin",
         path="/tmp/project/.miniharness/plugins/other-plugin/skills/other-skill/SKILL.md",
     ))
     loop = SimpleNamespace(_plugin_index=[
@@ -265,10 +267,157 @@ def test_skills_command_groups_plugin_skills_by_plugin_name():
     assert "── demo-plugin ──" in result.message
     assert "── other-plugin ──" in result.message
     assert "── Plugin ──" not in result.message
-    assert "/hello-world" in result.message
+    assert "/demo-plugin:hello-world" in result.message
+    assert "/other-plugin:other-skill" in result.message
     assert "A friendly hello-world skill from a plugin."[:50] in result.message
     assert "🔴" in result.message
     assert "🟢" in result.message
+
+
+def test_system_prompt_uses_namespaced_active_plugin_skills():
+    from miniharness.prompts.system import assemble_system_prompt
+
+    reg = SkillRegistry()
+    reg.register(SkillDefinition(
+        name="hello-world",
+        description="A friendly hello-world skill from a plugin.",
+        content="# hello",
+        source="plugin",
+        plugin_name="demo-plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    ))
+    plugin_index = [{"name": "demo-plugin", "description": "Demo plugin", "active": False}]
+
+    prompt = assemble_system_prompt(
+        base_prompt="You are an agent.",
+        cwd=Path("/tmp/project"),
+        skill_registry=reg,
+        plugin_index=plugin_index,
+    )
+    assert "demo-plugin:hello-world" not in prompt
+    assert "# Available Plugins" in prompt
+
+    plugin_index[0]["active"] = True
+    prompt = assemble_system_prompt(
+        base_prompt="You are an agent.",
+        cwd=Path("/tmp/project"),
+        skill_registry=reg,
+        plugin_index=plugin_index,
+    )
+    assert "**demo-plugin:hello-world**" in prompt
+
+
+def test_plugin_skill_slash_command_requires_active_plugin():
+    from types import SimpleNamespace
+
+    from miniharness.commands.registry import CommandRegistry
+    from miniharness.commands.types import CommandContext
+
+    reg = SkillRegistry()
+    reg.register(SkillDefinition(
+        name="hello-world",
+        description="Plugin skill.",
+        content="# plugin",
+        source="plugin",
+        plugin_name="demo-plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    ))
+    commands = CommandRegistry()
+    commands.register_from_skills(reg)
+    loop = SimpleNamespace(_plugin_index=[{"name": "demo-plugin", "active": False}])
+    ctx = CommandContext(loop=loop, console=None, cwd=Path("/tmp/project"), skill_registry=reg)
+
+    result = commands.dispatch("/demo-plugin:hello-world", ctx)
+    assert result.message is not None
+    assert "inactive" in result.message
+
+    result = commands.dispatch("/hello-world", ctx)
+    assert result.message is not None
+    assert "Unknown command" in result.message
+
+    loop._plugin_index[0]["active"] = True
+    result = commands.dispatch("/demo-plugin:hello-world", ctx)
+    assert result.submit_prompt is not None
+    assert "[Skill invoked: /demo-plugin:hello-world]" in result.submit_prompt
+
+
+def test_plugin_skills_are_namespaced_and_do_not_shadow_direct_skills():
+    reg = SkillRegistry()
+    direct = SkillDefinition(
+        name="hello-world",
+        description="Direct skill.",
+        content="# direct",
+        source="user",
+    )
+    plugin = SkillDefinition(
+        name="hello-world",
+        description="Plugin skill.",
+        content="# plugin",
+        source="plugin",
+        plugin_name="demo-plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    )
+
+    reg.register(direct)
+    reg.register(plugin)
+
+    assert reg.get("hello-world") is direct
+    assert reg.get("demo-plugin:hello-world") is plugin
+    assert reg.get("Demo-Plugin:Hello-World") is plugin
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_blocks_inactive_plugin_skill():
+    from miniharness.permissions import PermissionChecker
+    from miniharness.skills.tool import SkillTool, SkillToolInput
+
+    reg = SkillRegistry()
+    reg.register(SkillDefinition(
+        name="hello-world",
+        description="Plugin skill.",
+        content="# plugin",
+        source="plugin",
+        plugin_name="demo-plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    ))
+    tool = SkillTool(
+        cwd=Path("/tmp"),
+        registry=reg,
+        permissions=PermissionChecker(cwd=Path("/tmp"), mode="bypass"),
+        plugin_index=[{"name": "demo-plugin", "active": False}],
+    )
+
+    result = await tool.execute(SkillToolInput(name="demo-plugin:hello-world"))
+
+    assert result.is_error
+    assert "not active" in result.output
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_loads_active_plugin_skill_by_namespace():
+    from miniharness.permissions import PermissionChecker
+    from miniharness.skills.tool import SkillTool, SkillToolInput
+
+    reg = SkillRegistry()
+    reg.register(SkillDefinition(
+        name="hello-world",
+        description="Plugin skill.",
+        content="# plugin",
+        source="plugin",
+        plugin_name="demo-plugin",
+        path="/tmp/project/.miniharness/plugins/demo-plugin/skills/hello-world/SKILL.md",
+    ))
+    tool = SkillTool(
+        cwd=Path("/tmp"),
+        registry=reg,
+        permissions=PermissionChecker(cwd=Path("/tmp"), mode="bypass"),
+        plugin_index=[{"name": "demo-plugin", "active": True}],
+    )
+
+    result = await tool.execute(SkillToolInput(name="demo-plugin:hello-world"))
+
+    assert not result.is_error
+    assert "[Loaded skill: demo-plugin:hello-world]" in result.output
 
 
 # ===================================================================

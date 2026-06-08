@@ -246,7 +246,7 @@ def assemble_system_prompt(
         active_plugin_names = {
             p["name"] for p in (plugin_index or []) if p.get("active")
         }
-        skills_section = _build_skills_section(skill_registry, exclude_inactive_plugins=active_plugin_names)
+        skills_section = _build_skills_section(skill_registry, active_plugin_names=active_plugin_names)
         if skills_section:
             sections.append(skills_section)
 
@@ -257,7 +257,8 @@ def assemble_system_prompt(
             lines = [
                 "# Available Plugins",
                 "",
-                "You have a `plugin` tool.  Activate a plugin to see its skills "
+                "Use the `plugin` tool to activate a trusted plugin for the current "
+                "conversation. Activation exposes that plugin's namespaced skills "
                 "and plugin-contributed MCP tools.",
                 "",
             ]
@@ -315,7 +316,7 @@ def _build_mcp_section(mcp_manager, *, plugin_index: list[dict] | None = None) -
 def _build_skills_section(
     registry,
     *,
-    exclude_inactive_plugins: set[str] | None = None,
+    active_plugin_names: set[str] | None = None,
 ) -> str | None:
     """Build the 'Available Skills' block for the system prompt.
 
@@ -326,11 +327,11 @@ def _build_skills_section(
     skills = registry.model_invocable_skills()
 
     # Filter: hide plugin skills from inactive plugins.
-    if exclude_inactive_plugins is not None:
-        active_set = exclude_inactive_plugins
+    if active_plugin_names is not None:
+        active_set = active_plugin_names
         skills = [
             s for s in skills
-            if s.source != "plugin" or s.source == "plugin" and _plugin_name_of(s) in active_set
+            if s.source != "plugin" or (getattr(s, "plugin_name", None) in active_set)
         ]
 
     if not skills:
@@ -345,26 +346,6 @@ def _build_skills_section(
         "",
     ]
     for skill in skills:
-        lines.append(f"- **{skill.name}**: {skill.description}")
+        lines.append(f"- **{skill.invocation_name}**: {skill.description}")
 
     return "\n".join(lines)
-
-
-def _plugin_name_of(skill) -> str:
-    """Extract plugin name from a plugin skill's base_dir path.
-
-    Plugin skills are in ``plugins/<name>/skills/<skill>/SKILL.md``.
-    The plugin name is the directory after ``plugins/``.
-    """
-    import os
-    path = getattr(skill, "path", "") or ""
-    parts = path.split(os.sep)
-    # Walk backwards: .../plugins/<plugin-name>/skills/<skill-name>/SKILL.md
-    try:
-        # Find "plugins" in path and return the next segment.
-        for i, p in enumerate(parts):
-            if p == "plugins" and i + 1 < len(parts):
-                return parts[i + 1]
-    except (ValueError, IndexError):
-        pass
-    return ""

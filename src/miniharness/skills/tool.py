@@ -5,8 +5,8 @@ When the model calls ``skill(name="code-review")``, this tool:
 2. Returns the full markdown content as instructions.
 3. Records the invocation in ``tool_metadata["invoked_skills"]``.
 
-The skill registry is reloaded on each invocation so dynamically-added
-skills (project/user) are always visible.
+Plugin skills use namespaced names such as ``demo-plugin:hello-world`` and are
+blocked unless their plugin is active in the current runtime context.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from miniharness.tools.base import BaseTool, ToolResult
+from miniharness.plugins.gating import is_plugin_active
 
 
 class SkillToolInput(BaseModel):
@@ -39,9 +40,17 @@ class SkillTool(BaseTool):
     )
     input_model = SkillToolInput
 
-    def __init__(self, *, cwd: Path, registry=None, permissions=None) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        registry=None,
+        permissions=None,
+        plugin_index: list[dict] | None = None,
+    ) -> None:
         super().__init__(cwd=cwd, permissions=permissions)
         self._registry = registry
+        self._plugin_index = plugin_index or []
 
     async def execute(self, arguments: SkillToolInput) -> ToolResult:
         """Load and return the skill's content.
@@ -68,6 +77,14 @@ class SkillTool(BaseTool):
                 is_error=True,
             )
 
+        plugin_name = getattr(skill, "plugin_name", None)
+        if plugin_name and not is_plugin_active(plugin_name, self._plugin_index):
+            return ToolResult(
+                f"Plugin skill '{skill.invocation_name}' is not active in the current runtime context. "
+                f"Activate plugin '{plugin_name}' first.",
+                is_error=True,
+            )
+
         # Apply template substitutions.
         content = skill.content
         if skill.base_dir:
@@ -79,5 +96,5 @@ class SkillTool(BaseTool):
             )
 
         return ToolResult(
-            f"[Loaded skill: {skill.name}]\n\n{content}"
+            f"[Loaded skill: {skill.invocation_name}]\n\n{content}"
         )

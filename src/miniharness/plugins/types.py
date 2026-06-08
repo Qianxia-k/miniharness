@@ -20,8 +20,9 @@ class LoadedPlugin:
     path:
         Absolute filesystem path to the plugin directory.
     enabled:
-        Whether this plugin is currently active (from settings override
-        or ``enabled_by_default``).
+        Whether this plugin is trusted/configured and allowed to contribute
+        capabilities. Runtime exposure is tracked separately as ``active`` in
+        AgentLoop's plugin index.
     skills:
         Skill definitions loaded from the skills subdirectory.
     hooks:

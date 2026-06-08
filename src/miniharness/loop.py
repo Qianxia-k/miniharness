@@ -216,6 +216,7 @@ class AgentLoop:
             cwd=cwd,
             registry=self.skill_registry,
             permissions=self.permissions,
+            plugin_index=self._plugin_index,
         ))
 
         self.tools.register(PluginTool(

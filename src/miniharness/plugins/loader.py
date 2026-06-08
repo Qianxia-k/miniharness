@@ -3,8 +3,11 @@
 Plugin discovery order:
     1. User-level: ``~/.miniharness/plugins/<name>/plugin.json``
     2. Project-level: ``.miniharness/plugins/<name>/plugin.json``
+       (only when ``settings.allow_project_plugins`` is true)
 
 Later sources override earlier ones (project overrides user for same name).
+Project-local plugins are disabled by default because MiniHarness is a coding
+agent that may be launched inside arbitrary repositories.
 
 A plugin directory looks like::
 
@@ -79,7 +82,7 @@ def discover_plugin_paths(
     roots.append(user_dir)
 
     # 2. Project-level: .miniharness/plugins/
-    allow_project = getattr(settings, "allow_project_plugins", True)
+    allow_project = getattr(settings, "allow_project_plugins", False)
     if allow_project and cwd is not None:
         proj_dir = Path(cwd).resolve() / ".miniharness" / "plugins"
         roots.append(proj_dir)
@@ -131,8 +134,16 @@ def _load_one(path: Path, enabled_map: dict[str, bool]) -> LoadedPlugin | None:
 
     enabled = enabled_map.get(manifest.name, manifest.enabled_by_default)
 
-    # Load contributions.
-    skills = _load_plugin_skills(path / manifest.skills_dir)
+    # Load contributions from enabled plugins. A disabled plugin remains visible
+    # to management commands but does not contribute runtime capabilities.
+    if not enabled:
+        return LoadedPlugin(
+            manifest=manifest,
+            path=path,
+            enabled=enabled,
+        )
+
+    skills = _load_plugin_skills(path / manifest.skills_dir, plugin_name=manifest.name)
     hooks = _load_plugin_hooks(path / manifest.hooks_file)
     mcp_servers = _load_plugin_mcp(path / manifest.mcp_file)
 
@@ -168,7 +179,7 @@ def _find_manifest(plugin_dir: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
-def _load_plugin_skills(skills_dir: Path) -> list[Any]:
+def _load_plugin_skills(skills_dir: Path, *, plugin_name: str) -> list[Any]:
     """Load skills from a plugin's skills subdirectory.
 
     Uses the standard ``<name>/SKILL.md`` convention.
@@ -203,6 +214,7 @@ def _load_plugin_skills(skills_dir: Path) -> list[Any]:
             description=meta["description"],
             content=meta["body"],
             source="plugin",
+            plugin_name=plugin_name,
             path=str(skill_file),
             base_dir=str(entry),
             model_invocable=not parse_bool(fm.get("disable_model_invocation"), default=False),

@@ -6,6 +6,7 @@ the model how to perform a specific task.  Skills can be:
 - **bundled** with MiniHarness (in ``skills/bundled/content/``)
 - **project** skills (in ``.miniharness/skills/<name>/SKILL.md``)
 - **user** skills (in ``~/.miniharness/skills/<name>/SKILL.md``)
+- **plugin** skills (in plugin directories, addressed as ``plugin:skill``)
 """
 
 from __future__ import annotations
@@ -40,6 +41,9 @@ class SkillDefinition:
         ``False`` = user-only (invoked via ``/<name>`` slash command).
     user_invocable:
         Whether users can invoke this skill directly via ``/<name>``.
+    plugin_name:
+        Plugin identifier for plugin-contributed skills. ``None`` for direct
+        bundled/project/user skills.
     """
 
     name: str
@@ -50,12 +54,26 @@ class SkillDefinition:
     base_dir: str | None = None
     model_invocable: bool = True
     user_invocable: bool = True
+    plugin_name: str | None = None
 
     # ── Display helpers ────────────────────────────────────────────
 
     @property
     def command_name(self) -> str:
         """The name used for slash-commands (directory basename or skill name)."""
+        if self.plugin_name:
+            return f"{self.plugin_name}:{self._local_command_name}"
+        return self._local_command_name
+
+    @property
+    def invocation_name(self) -> str:
+        """Stable name passed to the skill tool and shown in prompts."""
+        if self.plugin_name:
+            return f"{self.plugin_name}:{self._local_command_name}"
+        return self.name
+
+    @property
+    def _local_command_name(self) -> str:
         if self.path:
             from pathlib import Path
             return Path(self.path).parent.name

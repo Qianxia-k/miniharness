@@ -101,8 +101,11 @@ class Settings:
     # {name: McpStdioServerConfig | McpHttpServerConfig | dict}
     mcp_servers: dict = field(default_factory=dict)
     # Plugin system — {plugin_name: True/False} for enabled/disabled.
+    #
+    # enabled = trusted/configured and allowed to contribute capabilities.
+    # active = exposed in the current runtime context after plugin activation.
     enabled_plugins: dict = field(default_factory=dict)
-    allow_project_plugins: bool = True
+    allow_project_plugins: bool = False
     max_turns: int = 8
     context_budget_ratio: float = 0.8  # trigger compaction at 80% context usage
     keep_last_n_turns: int = 3  # when compacting, always keep the last N turns intact

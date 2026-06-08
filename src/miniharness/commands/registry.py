@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from miniharness.commands.types import CommandContext, CommandHandler, CommandResult
+from miniharness.plugins.gating import is_plugin_active
 
 
 class CommandRegistry:
@@ -92,7 +93,7 @@ class CommandRegistry:
             cmd_name,
             _make_skill_handler(skill),
             description=getattr(skill, "description", ""),
-            aliases=[skill.name] if skill.name != cmd_name else None,
+            aliases=_skill_aliases(skill, cmd_name),
             source="skill",
         )
 
@@ -101,7 +102,7 @@ class CommandRegistry:
         for skill in skill_registry.list_skills():
             if not skill.user_invocable:
                 continue
-            cmd_name = skill.name
+            cmd_name = getattr(skill, "command_name", skill.name)
             if not cmd_name or not _is_valid_command_name(cmd_name):
                 continue
 
@@ -109,7 +110,7 @@ class CommandRegistry:
                 cmd_name,
                 _make_skill_handler(skill),
                 description=skill.description,
-                aliases=[skill.name] if skill.name != cmd_name else None,
+                aliases=_skill_aliases(skill, cmd_name),
                 source="skill",
             )
     def register_from_tools(self, tool_registry: Any) -> None:
@@ -208,7 +209,18 @@ def _is_valid_command_name(name: str) -> bool:
     """
     if not name or not name.strip():
         return False
-    return all(c.isalnum() or c in "-_" for c in name)
+    return all(c.isalnum() or c in "-_:" for c in name)
+
+
+def _skill_aliases(skill: Any, cmd_name: str) -> list[str] | None:
+    """Return safe aliases for a skill slash command.
+
+    Plugin skills must remain namespaced, so they never get a bare local-name
+    alias such as ``/hello-world``.
+    """
+    if getattr(skill, "plugin_name", None):
+        return None
+    return [skill.name] if skill.name != cmd_name else None
 
 
 def _make_skill_handler(skill) -> CommandHandler:
@@ -220,6 +232,15 @@ def _make_skill_handler(skill) -> CommandHandler:
     """
 
     def handler(args: str, ctx: CommandContext) -> CommandResult:
+        plugin_name = getattr(skill, "plugin_name", None)
+        if plugin_name:
+            plugin_index = getattr(getattr(ctx, "loop", None), "_plugin_index", None)
+            if not is_plugin_active(plugin_name, plugin_index):
+                return CommandResult.ok(
+                    f"Plugin skill '/{skill.invocation_name}' is inactive. "
+                    f"Run /plugins {plugin_name} on first."
+                )
+
         # Build the prompt from skill content.
         content = skill.content
         if skill.base_dir:
@@ -233,7 +254,7 @@ def _make_skill_handler(skill) -> CommandHandler:
             content = f"{content}\n\nUser input: {args}"
 
         prompt = (
-            f"[Skill invoked: /{skill.name}]\n"
+            f"[Skill invoked: /{skill.invocation_name}]\n"
             f"Follow these instructions:\n\n{content}"
         )
         return CommandResult.prompt(prompt)

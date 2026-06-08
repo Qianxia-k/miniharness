@@ -30,7 +30,10 @@ class SkillRegistry:
     def register(self, skill: SkillDefinition) -> None:
         """Register a skill under all its lookup keys.
 
-        Keys: name, command_name, display_name.
+        Direct skills are indexed by name/command/display keys. Plugin skills
+        are indexed only by their namespaced invocation key
+        (``plugin-name:skill-name``), preventing silent collisions with direct
+        skills or other plugins.
         Later registrations for the same key overwrite earlier ones
         (project skills can override bundled, user skills override project).
         """
@@ -54,9 +57,9 @@ class SkillRegistry:
         """Return all unique skills, sorted by name."""
         # Deduplicate by (source, path) — same skill may be registered
         # under multiple keys.
-        seen: dict[tuple[str, str | None], SkillDefinition] = {}
+        seen: dict[tuple[str, str, str], SkillDefinition] = {}
         for skill in self._skills.values():
-            key = (skill.source, skill.path or skill.name)
+            key = (skill.source, skill.plugin_name or "", skill.path or skill.name)
             seen[key] = skill
         return sorted(seen.values(), key=lambda s: s.name)
 
@@ -77,6 +80,10 @@ class SkillRegistry:
     def _keys_for(skill: SkillDefinition) -> list[str]:
         """Build lookup keys for a skill."""
         keys: list[str] = []
+        if skill.source == "plugin" or skill.plugin_name:
+            invocation = skill.invocation_name
+            return [invocation, invocation.lower()]
+
         # Canonical name.
         if skill.name:
             keys.append(skill.name)

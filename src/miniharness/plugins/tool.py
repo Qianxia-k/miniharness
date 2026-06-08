@@ -1,13 +1,8 @@
-"""Plugin activation tool — controls plugin capability visibility.
+"""Plugin activation tool — controls runtime capability visibility.
 
-Unlike skills (always injected), plugin skills are COLLAPSED behind a
-single plugin description by default.  ``plugin(name="x")`` activates a
-plugin so its skills and MCP tools become visible in the next turn's
-system prompt and tool schema.
-
-Skills are always registered in the skill_registry (the model COULD call
-them directly), but the system prompt only lists activated plugins'
-skills, saving tokens when there are many plugins.
+Installed/enabled plugins are trusted configuration. Activating a plugin is a
+per-conversation context decision: it exposes that plugin's namespaced skills
+and MCP tools, and execution-side gates reject inactive plugin capabilities.
 """
 
 from __future__ import annotations
@@ -33,8 +28,8 @@ class PluginTool(BaseTool):
 
     name = "plugin"
     description = (
-        "Activate a plugin by name to see its available skills.  "
-        "Use this when a user's request matches a plugin description."
+        "Activate a trusted plugin by name to expose its namespaced skills "
+        "and MCP tools in the current runtime context."
     )
     input_model = PluginToolInput
 
@@ -73,7 +68,7 @@ class PluginTool(BaseTool):
             if skills:
                 lines.append("Skills:")
                 for s in skills:
-                    lines.append(f"- **{s.name}**: {s.description}")
+                    lines.append(f"- **{s.invocation_name}**: {s.description}")
             if mcp_servers:
                 if skills:
                     lines.append("")

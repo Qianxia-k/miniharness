@@ -402,8 +402,8 @@ def cmd_plugins(args: str, ctx: CommandContext) -> CommandResult:
 
     /plugins              → list all plugins
     /plugins <name>       → show details of one plugin
-    /plugins <name> on    → activate plugin
-    /plugins <name> off   → deactivate plugin
+    /plugins <name> on    → activate plugin in this conversation
+    /plugins <name> off   → deactivate plugin in this conversation
     """
     plugin_index = _get_plugin_index(ctx)
     if plugin_index is None:
@@ -447,11 +447,13 @@ def cmd_plugins(args: str, ctx: CommandContext) -> CommandResult:
             lines = [
                 f"{icon} **{name}** [{status}]",
                 f"  Description: {entry.get('description', '(none)')}",
+                f"  Enabled: {'yes' if getattr(plugin_obj, 'enabled', False) else 'no'}",
+                "  Active: controls current conversation prompt/tool exposure",
                 "",
             ]
             lines.append(f"  Skills ({len(skills)}):")
             for s in skills:
-                lines.append(f"    - {s.name}: {s.description[:60]}")
+                lines.append(f"    - /{s.invocation_name}: {s.description[:60]}")
             if not skills:
                 lines.append("    (none)")
 
@@ -486,7 +488,8 @@ def cmd_plugins(args: str, ctx: CommandContext) -> CommandResult:
             lines.append(f"     {desc}")
         lines.append(f"     skills:{skills_n}  hooks:{hooks_n}  mcp:{mcp_n}")
     lines.append("")
-    lines.append("🟢 = active (skills visible)   🔴 = inactive (skills hidden)")
+    lines.append("enabled = trusted/loaded   active = visible in this conversation")
+    lines.append("🟢 = active (skills/MCP visible)   🔴 = inactive (hidden and execution-blocked)")
     lines.append("/plugins <name> for details, /plugins <name> on|off to toggle")
     return CommandResult.ok("\n".join(lines))
 
@@ -507,7 +510,7 @@ def cmd_skills(args: str, ctx: CommandContext) -> CommandResult:
     plugin_grouped: dict[str, list] = {}
     for s in skills:
         if s.source == "plugin":
-            plugin_grouped.setdefault(_plugin_name_of_skill(s), []).append(s)
+            plugin_grouped.setdefault(getattr(s, "plugin_name", "") or "(unknown)", []).append(s)
         else:
             grouped.setdefault(s.source, []).append(s)
 
@@ -518,7 +521,7 @@ def cmd_skills(args: str, ctx: CommandContext) -> CommandResult:
             continue
         lines.append(f"── {source_labels.get(src, src)} ──")
         for s in group:
-            lines.append(f"  /{s.name:<25} {s.description[:50]}")
+            lines.append(f"  /{s.invocation_name:<25} {s.description[:50]}")
         lines.append("")
 
     for plugin_name in sorted(plugin_grouped):
@@ -526,7 +529,7 @@ def cmd_skills(args: str, ctx: CommandContext) -> CommandResult:
         icon = "🟢" if active else "🔴"
         lines.append(f"── {plugin_name} ──")
         for s in plugin_grouped[plugin_name]:
-            lines.append(f"  /{s.name:<25} {s.description[:50]} {icon}")
+            lines.append(f"  /{s.invocation_name:<25} {s.description[:50]} {icon}")
         lines.append("")
 
     lines.append("Use /<skill-name> to invoke, or /plugins to manage plugins.")
@@ -555,14 +558,3 @@ def _is_plugin_active(ctx: CommandContext, plugin_name: str) -> bool:
         if entry.get("name") == plugin_name:
             return entry.get("active", False)
     return False
-
-
-def _plugin_name_of_skill(skill) -> str:
-    """Extract plugin name from a skill's base directory path."""
-    import os
-    path = getattr(skill, "path", "") or ""
-    parts = path.split(os.sep)
-    for i, p in enumerate(parts):
-        if p == "plugins" and i + 1 < len(parts):
-            return parts[i + 1]
-    return ""

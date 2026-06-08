@@ -139,6 +139,13 @@ def _apply_env_vars(settings: Settings) -> Settings:
     if os.environ.get("MINIHARNESS_SANDBOX_IMAGE"):
         settings.sandbox = replace(settings.sandbox, image=os.environ["MINIHARNESS_SANDBOX_IMAGE"])
 
+    # Plugins
+    allow_project_plugins = os.environ.get("MINIHARNESS_ALLOW_PROJECT_PLUGINS", "").lower()
+    if allow_project_plugins in ("1", "true", "yes", "on"):
+        settings = replace(settings, allow_project_plugins=True)
+    elif allow_project_plugins in ("0", "false", "no", "off"):
+        settings = replace(settings, allow_project_plugins=False)
+
     return settings
 
 
