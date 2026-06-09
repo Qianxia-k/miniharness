@@ -1,0 +1,196 @@
+"""Frontend-backend protocol — JSON-lines messages over stdin/stdout.
+
+Every line on stdout is prefixed with ``MHJSON:`` followed by a JSON
+object.  Lines without the prefix are treated as raw log output.
+
+Mirrors OpenHarness's OHJSON protocol.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
+
+# Protocol line prefix — used to distinguish structured messages from log noise.
+PROTOCOL_PREFIX = "MHJSON:"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Backend → Frontend events
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class AssistantDelta:
+    """Streaming token from the LLM."""
+    type: Literal["assistant_delta"] = "assistant_delta"
+    text: str = ""
+
+
+@dataclass
+class AssistantComplete:
+    """Final assistant message (after streaming)."""
+    type: Literal["assistant_complete"] = "assistant_complete"
+    text: str = ""
+
+
+@dataclass
+class ToolStarted:
+    """Tool execution begins."""
+    type: Literal["tool_started"] = "tool_started"
+    tool_name: str = ""
+    tool_input: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolCompleted:
+    """Tool execution finished."""
+    type: Literal["tool_completed"] = "tool_completed"
+    tool_name: str = ""
+    output: str = ""
+    is_error: bool = False
+
+
+@dataclass
+class PermissionRequest:
+    """Backend asks frontend for permission to execute a tool."""
+    type: Literal["permission_request"] = "permission_request"
+    request_id: str = ""
+    tool_name: str = ""
+    prompt: str = ""  # human-readable question
+
+
+@dataclass
+class ErrorEvent:
+    """Error surfaced to the frontend."""
+    type: Literal["error"] = "error"
+    message: str = ""
+
+
+@dataclass
+class ReadyEvent:
+    """Backend initialized and ready."""
+    type: Literal["ready"] = "ready"
+    model: str = ""
+    cwd: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class ShutdownEvent:
+    """Backend is shutting down."""
+    type: Literal["shutdown"] = "shutdown"
+
+
+@dataclass
+class StatusEvent:
+    """Transient status message."""
+    type: Literal["status"] = "status"
+    message: str = ""
+
+
+@dataclass
+class SystemMessage:
+    """Transcript-visible system message."""
+    type: Literal["system_message"] = "system_message"
+    message: str = ""
+
+
+@dataclass
+class LineComplete:
+    """One submitted line finished processing."""
+    type: Literal["line_complete"] = "line_complete"
+
+
+BackendEvent = (
+    AssistantDelta | AssistantComplete | ToolStarted | ToolCompleted
+    | PermissionRequest | ErrorEvent | ReadyEvent | ShutdownEvent | SystemMessage
+    | LineComplete | StatusEvent
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Frontend → Backend requests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class SubmitLine:
+    """User submitted a prompt."""
+    type: Literal["submit_line"] = "submit_line"
+    line: str = ""
+
+
+@dataclass
+class PermissionResponse:
+    """User answered a permission request."""
+    type: Literal["permission_response"] = "permission_response"
+    request_id: str = ""
+    allowed: bool = False
+
+
+@dataclass
+class Interrupt:
+    """User pressed Ctrl+C."""
+    type: Literal["interrupt"] = "interrupt"
+
+
+@dataclass
+class FrontendShutdown:
+    """User wants to exit."""
+    type: Literal["shutdown"] = "shutdown"
+
+
+FrontendRequest = SubmitLine | PermissionResponse | Interrupt | FrontendShutdown
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Wire helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+import json
+
+
+def encode_event(event: BackendEvent) -> str:
+    """Serialize a backend event to a protocol line."""
+    d = _asdict(event)
+    return PROTOCOL_PREFIX + json.dumps(d, ensure_ascii=False, default=str)
+
+
+def encode_request(req: FrontendRequest) -> str:
+    """Serialize a frontend request to a protocol line."""
+    d = _asdict(req)
+    return json.dumps(d, ensure_ascii=False)
+
+
+def decode_message(line: str) -> dict | None:
+    """Parse a protocol line into a dict.
+
+    Returns ``None`` if the line is not a valid protocol message.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def decode_event(line: str) -> dict | None:
+    """Parse an event line (with MHJSON: prefix) into a dict."""
+    line = line.strip()
+    if not line.startswith(PROTOCOL_PREFIX):
+        return None
+    return decode_message(line[len(PROTOCOL_PREFIX):])
+
+
+def _asdict(obj) -> dict:
+    """Convert a dataclass to dict, skipping None values."""
+    result = {}
+    for f in obj.__dataclass_fields__:
+        val = getattr(obj, f)
+        if val is not None:
+            result[f] = val
+    return result

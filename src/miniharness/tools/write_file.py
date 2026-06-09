@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from miniharness.tools.base import BaseTool, ToolResult
+from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 
 
 class WriteFileInput(BaseModel):
@@ -46,10 +46,19 @@ class WriteFileTool(BaseTool):
                     f"Refusing to write outside workspace: {path}", is_error=True
                 )
 
-        decision = self.permissions.can_write(path)
-        if not decision.allowed:
-            return ToolResult(decision.reason, is_error=True)
-
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(arguments.content, encoding="utf-8")
         return ToolResult(f"Wrote {path.stat().st_size} bytes to {path}")
+
+    def permission_requests(self, arguments: WriteFileInput) -> list[ToolPermissionRequest]:
+        raw_path = arguments.path.strip()
+        if not raw_path:
+            return []
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = self.cwd / path
+        return [ToolPermissionRequest(
+            is_read_only=False,
+            file_path=str(path.resolve()),
+            reason=f"Allow write_file to access/change {path.resolve()}?",
+        )]

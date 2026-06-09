@@ -55,6 +55,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /top-p [n]          Show or set LLM top_p")
     lines.append("  /max-tokens [n]     Show or set max output tokens")
     lines.append("  /memory             Show core/semantic/episodic memory")
+    lines.append("  /project            Show project instructions (MINIHARNESS.md)")
     lines.append("  /sessions           List saved sessions")
     lines.append("  /resume [id]        Resume a saved session")
     lines.append("  /tag <name>         Tag current session")
@@ -195,6 +196,30 @@ def cmd_max_tokens(args: str, ctx: CommandContext) -> CommandResult:
 # ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
+
+
+def cmd_project(args: str, ctx: CommandContext) -> CommandResult:
+    """Show or edit project instructions (MINIHARNESS.md)."""
+    from miniharness.prompts.project_instructions import (
+        load_project_instructions,
+        get_instructions_path,
+        create_default,
+    )
+
+    path = get_instructions_path(ctx.cwd)
+    if path is None:
+        path = create_default(ctx.cwd)
+        return CommandResult.ok(
+            f"No project instructions found. Created default at:\n"
+            f"  {path}\n\n"
+            f"Edit this file to define project rules and conventions.\n"
+            f"Use /project to view the current content."
+        )
+
+    content = load_project_instructions(ctx.cwd) or "(empty)"
+    return CommandResult.ok(
+        f"**Project Instructions**  ({path})\n\n{content}"
+    )
 
 
 def cmd_memory(args: str, ctx: CommandContext) -> CommandResult:

@@ -192,6 +192,7 @@ def assemble_system_prompt(
     skill_registry=None,  # SkillRegistry | None
     mcp_manager=None,     # McpClientManager | None
     plugin_index=None,    # list[dict] — [{name, description, active, skills}]
+    project_instructions: str = "",  # CLAUDE.md / AGENTS.md content
 ) -> str:
     """Assemble the full system prompt for a turn.
 
@@ -227,6 +228,10 @@ def assemble_system_prompt(
     # 1. Environment info.
     env_info = get_environment_info(cwd=cwd)
     sections.append(env_info)
+
+    # 1b. Project Instructions (CLAUDE.md / AGENTS.md).
+    if project_instructions:
+        sections.append(project_instructions)
 
     # 2. Tool availability hint.
     if tool_count > 0:

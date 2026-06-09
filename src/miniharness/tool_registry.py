@@ -6,9 +6,9 @@ The registry is the bridge between model-facing schemas and Python tool code.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
-from miniharness.permissions import PermissionChecker
+from miniharness.permissions import PermissionChecker, PermissionDecision
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
@@ -33,10 +33,12 @@ class ToolRegistry:
         *,
         permissions: PermissionChecker | None = None,
         is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
+        permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._permissions = permissions
         self._is_tool_enabled = is_tool_enabled
+        self._permission_prompt = permission_prompt
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
@@ -66,7 +68,7 @@ class ToolRegistry:
             return ToolResult(output=f"Invalid arguments for {name}: {exc}", is_error=True)
 
         if self._permissions is not None:
-            permission_result = self._check_permission_requests(name, tool, parsed)
+            permission_result = await self._check_permission_requests(name, tool, parsed)
             if permission_result is not None:
                 return permission_result
         return await tool.execute(parsed)
@@ -79,7 +81,7 @@ class ToolRegistry:
         except Exception:
             return False
 
-    def _check_permission_requests(
+    async def _check_permission_requests(
         self,
         name: str,
         tool: BaseTool,
@@ -111,10 +113,15 @@ class ToolRegistry:
             )
             if not decision.allowed:
                 if decision.requires_confirmation:
-                    decision = self._permissions.resolve_interactive(
-                        decision,
-                        _permission_prompt(name, request),
-                    )
+                    prompt = _permission_prompt(name, request)
+                    if self._permission_prompt is not None:
+                        allowed = await self._permission_prompt(name, prompt)
+                        if allowed:
+                            decision = PermissionDecision(True)
+                        else:
+                            decision = PermissionDecision(False, reason="User denied.")
+                    else:
+                        decision = self._permissions.resolve_interactive(decision, prompt)
                 if not decision.allowed:
                     return ToolResult(decision.reason, is_error=True)
         return None
@@ -148,6 +155,7 @@ def create_default_registry(
     mcp_manager=None,  # McpClientManager | None
     is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
     plugin_index: list[dict] | None = None,
+    permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> ToolRegistry:
     """Create a ToolRegistry with all built-in tools + MCP adapters.
 
@@ -161,7 +169,11 @@ def create_default_registry(
         Optional McpClientManager.  If provided, resource tools and MCP
         tool adapters are registered automatically.
     """
-    registry = ToolRegistry(permissions=permissions, is_tool_enabled=is_tool_enabled)
+    registry = ToolRegistry(
+        permissions=permissions,
+        is_tool_enabled=is_tool_enabled,
+        permission_prompt=permission_prompt,
+    )
     # Read-only tools
     registry.register(ReadFileTool(cwd=cwd, permissions=permissions))
     registry.register(LsTool(cwd=cwd, permissions=permissions))

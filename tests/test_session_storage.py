@@ -221,10 +221,10 @@ class TestRenameAndTag:
 
 
 class TestReplSessionSwitch:
-    def test_resume_saves_current_before_switching_without_overwriting_target(self, tmp_path: Path):
-        from miniharness.cli import _make_resume_handler, _make_command_context
+    @pytest.mark.asyncio
+    async def test_resume_saves_current_before_switching_without_overwriting_target(self, tmp_path: Path):
         from miniharness.config.settings import Settings
-        from miniharness.loop import AgentLoop
+        from miniharness.ui.runtime import RuntimeController
 
         a_messages = [{"role": "user", "content": "A before switch"}]
         b_messages = [{"role": "user", "content": "B before switch"}]
@@ -233,22 +233,34 @@ class TestReplSessionSwitch:
 
         current_a = a_messages + [{"role": "assistant", "content": "A unsaved"}]
 
-        loop = AgentLoop(cwd=tmp_path, settings=Settings())
-        loop.session_id = "a"
-        loop.restore_messages(current_a)
+        runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+        runtime.loop.session_id = "a"
+        runtime.loop.restore_messages(current_a)
+        system_messages: list[str] = []
+        agent_calls: list[str] = []
 
-        # Use the new command-based resume handler.
-        handler = _make_resume_handler(loop)
-        ctx = _make_command_context(loop)
-        result = handler("b", ctx)
-        next_loop = getattr(ctx, "_new_loop", loop)
+        async def run_agent(loop, prompt: str) -> str:
+            agent_calls.append(prompt)
+            return "should not run"
 
-        assert result.message is not None  # confirmation message
-        assert next_loop is not loop
-        assert next_loop.session_id == "b"
+        async def print_system(message: str) -> None:
+            system_messages.append(message)
+
+        try:
+            assert await runtime.handle_line(
+                "/resume b",
+                run_agent=run_agent,
+                print_system=print_system,
+            )
+        finally:
+            await runtime.close()
+
+        assert agent_calls == []
+        assert runtime.loop.session_id == "b"
+        assert any("Restored session b" in message for message in system_messages)
         assert [
             {"role": msg["role"], "content": msg["content"]}
-            for msg in next_loop.export_messages()
+            for msg in runtime.loop.export_messages()
         ] == b_messages
         assert [
             {"role": msg["role"], "content": msg["content"]}

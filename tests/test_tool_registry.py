@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from miniharness.permissions import PermissionChecker
 from miniharness.tool_registry import create_default_registry
 
@@ -75,3 +77,50 @@ def test_bash_allows_normal_command(tmp_path: Path):
 
     assert result.is_error is False
     assert result.output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_write_file_uses_async_permission_prompt(tmp_path: Path):
+    prompts: list[tuple[str, str]] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append((tool_name, prompt))
+        return True
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("write_file", {
+        "path": "allowed.txt",
+        "content": "ok",
+    })
+
+    assert result.is_error is False
+    assert (tmp_path / "allowed.txt").read_text(encoding="utf-8") == "ok"
+    assert prompts
+    assert prompts[0][0] == "write_file"
+    assert "allowed.txt" in prompts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_write_file_async_permission_denial_blocks_write(tmp_path: Path):
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("write_file", {
+        "path": "denied.txt",
+        "content": "nope",
+    })
+
+    assert result.is_error is True
+    assert "User denied" in result.output
+    assert not (tmp_path / "denied.txt").exists()

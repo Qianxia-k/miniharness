@@ -3,29 +3,19 @@
 Settings flow (mirrors OpenHarness's runtime.py):
     1. load_settings()  →  defaults + env vars + provider auto-detect
     2. apply_cli_overrides()  →  CLI args win over everything
-    3. Build command registry (built-in + skill auto-commands)
-    4. Start sandbox if enabled
-    5. Run agent loop (REPL dispatch via CommandRegistry)
-    6. Stop sandbox in finally
+    3. Build shared runtime controller
+    4. CLI / TUI provide different renderers over the same runtime pipeline
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
 import typer
 from rich.console import Console
 
-from miniharness.commands import CommandContext, CommandRegistry
-from miniharness.commands.builtin import (
-    cmd_clear, cmd_exit, cmd_help, cmd_history, cmd_hooks,
-    cmd_max_tokens, cmd_mcp, cmd_memory, cmd_model, cmd_permissions,
-    cmd_plugins, cmd_skills, cmd_temperature, cmd_tools, cmd_top_p, cmd_turns,
-)
-from miniharness.commands.types import CommandResult
 from miniharness.config import apply_cli_overrides, load_settings
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
@@ -34,10 +24,8 @@ from miniharness.sessions import (
     list_sessions,
     load_session_by_id,
     load_session_by_tag,
-    rename_session,
-    save_loop_snapshot,
-    switch_session,
 )
+from miniharness.ui.runtime import RuntimeController
 
 
 load_dotenv()
@@ -68,6 +56,8 @@ def main(
     continue_session: bool = typer.Option(False, "--continue", "-c", help="Resume the most recent session"),
     resume: str | None = typer.Option(None, "--resume", help="Resume a session by ID or tag name"),
     list_sessions_flag: bool = typer.Option(False, "--sessions", help="List saved sessions and exit"),
+    tui: bool = typer.Option(False, "--tui", help="Launch the TUI frontend"),
+    backend_only: bool = typer.Option(False, "--backend-only", help="Run in backend-only mode (for TUI to spawn)"),
 ) -> None:
     """Run a MiniHarness prompt, or start interactive REPL if no prompt given."""
     root = Path(cwd).expanduser().resolve()
@@ -87,6 +77,17 @@ def main(
 
     if list_sessions_flag:
         _print_sessions(root)
+        raise typer.Exit(0)
+
+    if backend_only:
+        from miniharness.ui.backend_host import BackendHost
+        asyncio.run(BackendHost(cwd=root, settings=settings).run())
+        raise typer.Exit(0)
+
+    if tui:
+        from miniharness.ui.tui import run_tui
+        resume_session_id = "latest" if continue_session else resume
+        run_tui(cwd=root, prompt=prompt, resume_session_id=resume_session_id)
         raise typer.Exit(0)
 
     if continue_session:
@@ -226,19 +227,17 @@ def _pick_session(root: Path) -> str:
 
 
 async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
-    if settings.sandbox.enabled:
-        from miniharness.sandbox import start_sandbox
-        console.print(f"[dim]Starting sandbox (image={settings.sandbox.image})...[/dim]")
-        await start_sandbox(cwd=root, image=settings.sandbox.image)
-        console.print("[dim]Sandbox ready[/dim]")
-
+    runtime = RuntimeController(cwd=root, settings=settings)
     try:
-        loop = AgentLoop(cwd=root, settings=settings)
-        await loop.run(prompt)
+        await runtime.start()
+        await runtime.handle_line(
+            prompt,
+            run_agent=_run_cli_agent,
+            print_system=_print_cli_system,
+            clear_output=_clear_cli_output,
+        )
     finally:
-        if settings.sandbox.enabled:
-            from miniharness.sandbox import stop_sandbox
-            await stop_sandbox()
+        await runtime.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -252,27 +251,7 @@ async def _run_repl(
     settings: Settings,
     resume_session_id: str | None = None,
 ) -> None:
-    loop = AgentLoop(cwd=root, settings=settings)
-    loop.session_id = uuid.uuid4().hex[:12]
-
-    # ---- Resume saved session -------------------------------------------
-    if resume_session_id is not None:
-        data = load_session_by_id(str(root), resume_session_id)
-        if data is None:
-            console.print(f"[yellow]Session '{resume_session_id}' not found, starting fresh.[/yellow]")
-        else:
-            loop.restore_messages(data.get("messages", []))
-            loop.session_id = data.get("session_id", loop.session_id)
-            loop.tag = data.get("tag", "")
-            msg_count = data.get("message_count", 0)
-            tag_info = f" @{loop.tag}" if loop.tag else ""
-            console.print(
-                f"[dim]Restored session [bold]{loop.session_id}[/bold]{tag_info} "
-                f"({msg_count} messages, model={data.get('model', '?')})[/dim]"
-            )
-
-    # ---- Build command registry -----------------------------------------
-    cmd_registry = _build_command_registry(loop)
+    runtime = RuntimeController(cwd=root, settings=settings)
 
     console.print("[bold]MiniHarness[/bold] — interactive mode")
     console.print("Type [dim]/help[/dim] for commands, [dim]/exit[/dim] to quit.")
@@ -290,14 +269,17 @@ async def _run_repl(
 
     console.print()
 
-    # ---- Sandbox lifecycle -----------------------------------------------
-    if settings.sandbox.enabled:
-        from miniharness.sandbox import start_sandbox
-        console.print(f"[dim]Starting sandbox (image={settings.sandbox.image})...[/dim]")
-        await start_sandbox(cwd=root, image=settings.sandbox.image)
-        console.print("[dim]Sandbox ready[/dim]\n")
-
     try:
+        await runtime.start()
+        if resume_session_id is not None:
+            resume_line = "/resume" if resume_session_id == "latest" else f"/resume {resume_session_id}"
+            await runtime.handle_line(
+                resume_line,
+                run_agent=_run_cli_agent,
+                print_system=_print_cli_system,
+                clear_output=_clear_cli_output,
+            )
+
         while True:
             try:
                 line = console.input("[bold]▸[/bold] ").strip()
@@ -308,203 +290,33 @@ async def _run_repl(
             if not line:
                 continue
 
-            should_save = False
-            if line.startswith("/"):
-                # ── Dispatch via CommandRegistry ──────────────────────
-                ctx = _make_command_context(loop)
-                result = cmd_registry.dispatch(line, ctx)
-
-                if result.message:
-                    console.print(result.message)
-
-                if result.exit:
-                    break
-
-                if result.submit_prompt:
-                    if not await _run_repl_turn(loop, result.submit_prompt):
-                        continue
-                    console.print()
-                    should_save = True
-
-                # Handle /resume — it may return a new loop via ctx.
-                new_loop = getattr(ctx, "_new_loop", None)
-                if new_loop is not None:
-                    loop = new_loop
-                    cmd_registry = _build_command_registry(loop)
-                    should_save = False
-
-                if result.should_save and not result.exit:
-                    should_save = True
-            else:
-                if not await _run_repl_turn(loop, line):
-                    continue
+            should_continue = await runtime.handle_line(
+                line,
+                run_agent=_run_cli_agent,
+                print_system=_print_cli_system,
+                clear_output=_clear_cli_output,
+            )
+            if not line.startswith("/"):
                 console.print()
-                should_save = True
-
-            if should_save:
-                save_loop_snapshot(loop)
+            if not should_continue:
+                break
     finally:
-        # Close MCP connections before event loop tears down.
-        # Use shield + timeout to prevent cancellation from breaking cleanup.
-        mcp = getattr(loop, '_mcp_manager', None)
-        if mcp is not None:
-            try:
-                await asyncio.shield(
-                    asyncio.wait_for(mcp.close(), timeout=5.0)
-                )
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                pass
-
-        if settings.sandbox.enabled:
-            from miniharness.sandbox import stop_sandbox
-            try:
-                await asyncio.shield(
-                    asyncio.wait_for(stop_sandbox(), timeout=3.0)
-                )
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                pass
+        await runtime.close()
 
 
-async def _run_repl_turn(loop: AgentLoop, prompt: str) -> bool:
-    """Run one user turn in the REPL.
-
-    Ctrl-C during a running model/tool turn cancels that turn and returns to
-    the prompt. Slash commands such as /q are only read between turns because
-    the REPL owns stdin synchronously.
-    """
+async def _run_cli_agent(loop: AgentLoop, prompt: str) -> str:
+    """Renderer adapter used by the shared runtime for CLI turns."""
     try:
-        await loop.run(prompt)
-        return True
+        return await loop.run(prompt)
     except asyncio.CancelledError:
         console.print("\n[yellow]Cancelled current turn.[/yellow]")
-        return False
+        return "Cancelled current turn."
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Command registry factory
-# ═══════════════════════════════════════════════════════════════════════════
+async def _print_cli_system(message: str) -> None:
+    if message:
+        console.print(message)
 
 
-def _build_command_registry(loop: AgentLoop) -> CommandRegistry:
-    """Build the full command registry: built-in + skill auto-commands."""
-    reg = CommandRegistry()
-
-    # ── Built-in commands ──────────────────────────────────────────────
-    reg.register("exit", cmd_exit, description="Exit MiniHarness",
-                 aliases=["quit", "q"], source="builtin")
-    reg.register("clear", cmd_clear, description="Clear conversation history",
-                 source="builtin")
-    reg.register("help", cmd_help, description="Show available commands",
-                 source="builtin")
-    reg.register("history", cmd_history, description="Show message count",
-                 source="builtin")
-    reg.register("model", cmd_model, description="Show or switch the model",
-                 source="builtin")
-    reg.register("turns", cmd_turns, description="Show or set max turns",
-                 source="builtin")
-    reg.register("permissions", cmd_permissions,
-                 description="Show or set permission mode", source="builtin")
-    reg.register("temperature", cmd_temperature,
-                 description="Show or set LLM temperature", source="builtin")
-    reg.register("top-p", cmd_top_p,
-                 description="Show or set LLM top_p", source="builtin")
-    reg.register("max-tokens", cmd_max_tokens,
-                 description="Show or set max output tokens", source="builtin")
-    reg.register("memory", cmd_memory,
-                 description="Show core/semantic/episodic memory", source="builtin")
-    reg.register("hooks", cmd_hooks,
-                 description="Show hook configuration", source="builtin")
-    reg.register("skills", cmd_skills,
-                 description="List available skills", source="builtin")
-    reg.register("plugins", cmd_plugins,
-                 description="List, inspect, or toggle plugins", source="builtin")
-    reg.register("tools", cmd_tools,
-                 description="List, describe, or execute tools", source="builtin")
-    reg.register("mcp", cmd_mcp,
-                 description="Show MCP server connection status", source="builtin")
-
-    # ── Session commands (need closure over loop) ──────────────────────
-    reg.register("sessions", _make_sessions_handler(loop.cwd),
-                 description="List saved sessions", source="builtin")
-    reg.register("resume", _make_resume_handler(loop),
-                 description="Resume a saved session", source="builtin")
-    reg.register("tag", _make_tag_handler(loop),
-                 description="Tag current session", source="builtin")
-
-    # ── Auto-generate skill slash commands ─────────────────────────────
-    if hasattr(loop, 'skill_registry') and loop.skill_registry is not None:
-        reg.register_from_skills(loop.skill_registry)
-
-    return reg
-
-
-def _make_command_context(loop: AgentLoop) -> CommandContext:
-    return CommandContext(
-        loop=loop,
-        console=console,
-        cwd=loop.cwd,
-        skill_registry=getattr(loop, 'skill_registry', None),
-        hook_registry=getattr(loop, 'hook_registry', None),
-        tool_registry=getattr(loop, 'tools', None),
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Session-command helpers (closures over loop for resume/tag/sessions)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _make_sessions_handler(cwd):
-    def handler(args: str, ctx: CommandContext) -> CommandResult:
-        from miniharness.commands.types import CommandResult
-        sessions = list_sessions(str(cwd))
-        _render_session_list(sessions, numbered=False,
-                            current_id=ctx.loop.session_id, show_header=True)
-        return CommandResult.ok()
-    return handler
-
-
-def _make_resume_handler(loop):
-    def handler(args: str, ctx: CommandContext) -> CommandResult:
-        from miniharness.commands.types import CommandResult
-        session_id = args if args else _pick_session(loop.cwd)
-        if session_id == "latest" and not args:
-            return CommandResult.ok()
-
-        data = load_session_by_id(str(loop.cwd), session_id)
-        if data is None:
-            data = load_session_by_tag(str(loop.cwd), session_id)
-        if data is None:
-            return CommandResult.ok(f"Session '{session_id}' not found.")
-
-        target_id = data.get("session_id", session_id)
-        if loop.session_id == target_id:
-            return CommandResult.ok(f"Already on session {target_id}.")
-
-        new_loop = switch_session(loop, target_id)
-        msg_count = len(new_loop.conversation.messages)
-        tag_info = f" @{new_loop.tag}" if new_loop.tag else ""
-        ctx._new_loop = new_loop
-        return CommandResult.ok(
-            f"Switched to session {new_loop.session_id}{tag_info} ({msg_count} messages)"
-        )
-    return handler
-
-
-def _make_tag_handler(loop):
-    def handler(args: str, ctx: CommandContext) -> CommandResult:
-        from miniharness.commands.types import CommandResult
-        if not args:
-            return CommandResult.ok("Usage: /tag <name>")
-        if not loop.session_id:
-            return CommandResult.ok("No active session to tag.")
-
-        ok = rename_session(str(loop.cwd), loop.session_id, args)
-        if ok:
-            loop.tag = args
-            return CommandResult.ok(
-                f"Session {loop.session_id} tagged as '{args}'.\n"
-                f"Resume with: uv run mh --resume {args}"
-            )
-        return CommandResult.ok(f"Could not tag session '{loop.session_id}'.")
-    return handler
+async def _clear_cli_output() -> None:
+    console.clear()

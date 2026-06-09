@@ -11,7 +11,7 @@ import subprocess
 
 from pydantic import BaseModel, Field
 
-from miniharness.tools.base import BaseTool, ToolResult
+from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 
 
 class BashInput(BaseModel):
@@ -33,10 +33,6 @@ class BashTool(BaseTool):
         markup_error = _reject_probable_markup(command)
         if markup_error:
             return ToolResult(markup_error, is_error=True)
-
-        decision = self.permissions.can_run_command(command)
-        if not decision.allowed:
-            return ToolResult(decision.reason, is_error=True)
 
         # ---- sandbox path ----
         from miniharness.sandbox import is_sandbox_active, get_sandbox
@@ -66,6 +62,16 @@ class BashTool(BaseTool):
         if result.stderr:
             output += f"\n[stderr]\n{result.stderr}"
         return ToolResult(output.strip() or f"(exit code {result.returncode})")
+
+    def permission_requests(self, arguments: BashInput) -> list[ToolPermissionRequest]:
+        command = arguments.command.strip()
+        if not command:
+            return []
+        return [ToolPermissionRequest(
+            is_read_only=False,
+            command=command,
+            reason=f"Allow bash to run command: {command[:120]}?",
+        )]
 
 
 _MERMAID_DIRECTIVE_RE = re.compile(

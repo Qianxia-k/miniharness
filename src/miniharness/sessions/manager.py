@@ -44,7 +44,10 @@ def save_loop_snapshot(loop: AgentLoop, *, make_latest: bool = True) -> None:
 
 
 def switch_session(
-    current_loop: AgentLoop, target_session_id: str
+    current_loop: AgentLoop,
+    target_session_id: str,
+    *,
+    permission_prompt=None,
 ) -> AgentLoop | None:
     """Save *current_loop* and switch to *target_session_id*.
 
@@ -66,7 +69,11 @@ def switch_session(
         return None
 
     # Build a clean loop for the target session.
-    next_loop = AgentLoop(cwd=current_loop.cwd, settings=current_loop.settings)
+    next_loop = AgentLoop(
+        cwd=current_loop.cwd,
+        settings=current_loop.settings,
+        permission_prompt=permission_prompt,
+    )
     next_loop.restore_messages(data.get("messages", []))
     next_loop.session_id = data.get("session_id", target_session_id)
     next_loop.tag = data.get("tag", "")

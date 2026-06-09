@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from miniharness.config.settings import Settings
 from miniharness.context.budget import ContextBudget
@@ -93,6 +94,7 @@ from miniharness.permissions import PermissionChecker
 from miniharness.plugins import load_plugins
 from miniharness.plugins.gating import is_tool_visible
 from miniharness.plugins.tool import PluginTool
+from miniharness.prompts.project_instructions import load_project_instructions
 from miniharness.prompts.system import assemble_system_prompt
 from miniharness.providers import get_profile
 from miniharness.skills import SkillTool, load_skill_registry
@@ -165,9 +167,16 @@ class AgentLoop:
     user prompt through the full agent loop.
     """
 
-    def __init__(self, *, cwd: Path, settings: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        settings: Settings,
+        permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+    ) -> None:
         self.cwd = cwd
         self.settings = settings
+        self._permission_prompt = permission_prompt
 
         # ── Provider & model ──────────────────────────────────────────
         provider_profile = get_profile(settings.provider.name)
@@ -208,6 +217,7 @@ class AgentLoop:
             mcp_manager=self._mcp_manager,
             is_tool_enabled=self._is_tool_enabled,
             plugin_index=self._plugin_index,
+            permission_prompt=self._permission_prompt,
         )
 
         # ── Skills: bundled + project + user + plugins → registry ────
@@ -516,13 +526,9 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     def _build_system_prompt(self, *, user_query: str = "") -> str:
-        """Assemble the full system prompt for a turn.
-
-        Delegates to ``prompts/system.py`` for text assembly — the loop
-        only provides the inputs (base prompt, cwd, core memory text,
-        user query, tool count).
-        """
+        """Assemble the full system prompt for a turn."""
         core_text = self.core_memory.render_for_system_prompt()
+        instructions = load_project_instructions(self.cwd) or ""
         return assemble_system_prompt(
             base_prompt=SYSTEM_PROMPT,
             cwd=self.cwd,
@@ -532,6 +538,7 @@ class AgentLoop:
             skill_registry=self.skill_registry,
             mcp_manager=self._mcp_manager,
             plugin_index=self._plugin_index,
+            project_instructions=instructions,
         )
 
     def _is_tool_enabled(self, name: str, tool) -> bool:

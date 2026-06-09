@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from miniharness.tools.base import BaseTool, ToolResult
+from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 
 
 class EditFileInput(BaseModel):
@@ -60,10 +60,6 @@ class EditFileTool(BaseTool):
         if arguments.old_str not in original:
             return ToolResult("old_str was not found in the file", is_error=True)
 
-        decision = self.permissions.can_write(path)
-        if not decision.allowed:
-            return ToolResult(decision.reason, is_error=True)
-
         if arguments.replace_all:
             updated = original.replace(arguments.old_str, arguments.new_str)
         else:
@@ -77,3 +73,14 @@ class EditFileTool(BaseTool):
         if not path.is_absolute():
             path = self.cwd / path
         return path.resolve()
+
+    def permission_requests(self, arguments: EditFileInput) -> list[ToolPermissionRequest]:
+        raw_path = arguments.path.strip()
+        if not raw_path:
+            return []
+        path = self._resolve_path(raw_path)
+        return [ToolPermissionRequest(
+            is_read_only=False,
+            file_path=str(path),
+            reason=f"Allow edit_file to access/change {path}?",
+        )]

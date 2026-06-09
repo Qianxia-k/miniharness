@@ -125,9 +125,9 @@ class BaseTool:
     def permission_requests(self, arguments: BaseModel) -> list[ToolPermissionRequest]:
         """Return registry-level permission checks required before execution.
 
-        The default is empty for backward compatibility with built-in tools
-        that already perform their own permission checks inside ``execute``.
-        External tool adapters should override this.
+        The default is empty for read-only tools. Mutating tools should return
+        requests here so all user approval flows are centralized in
+        ``ToolRegistry``.
         """
         del arguments
         return []
