@@ -230,6 +230,74 @@ def test_corrupt_json(tmp_path):
     print("10. Corrupt JSON recovery: OK")
 
 
+def test_semantic_duplicate_refreshes_existing_entry(tmp_path):
+    with patch("miniharness.memory.base.get_memory_dir", return_value=tmp_path):
+        store = SemanticStore("/fake/project", max_entries=100)
+
+        id1 = store.add("Project uses FastAPI", tags=["tech-stack"])
+        time.sleep(0.01)
+        id2 = store.add("Project uses FastAPI", tags=["python"])
+
+        assert id1 == id2
+        entries = store.list_all(limit=50)
+        assert len(entries) == 1
+        assert entries[0]["id"] == id1
+        assert entries[0]["status"] == "active"
+        assert entries[0]["tags"] == ["tech-stack", "python"]
+        assert entries[0]["updated_at"] >= entries[0]["created_at"]
+    print("11. Semantic duplicate refresh: OK")
+
+
+def test_semantic_supersedes_disables_old_entry(tmp_path):
+    with patch("miniharness.memory.base.get_memory_dir", return_value=tmp_path):
+        store = SemanticStore("/fake/project", max_entries=100)
+
+        old_id = store.add("Auth module uses JWT with HS256", tags=["auth"])
+        new_id = store.add(
+            "Auth module uses JWT with RS256",
+            tags=["auth"],
+            supersedes=[old_id],
+        )
+
+        active = store.list_all(limit=50)
+        assert [entry["id"] for entry in active] == [new_id]
+        assert active[0]["supersedes"] == [old_id]
+
+        all_entries = store.list_all(limit=50, include_disabled=True)
+        old = next(entry for entry in all_entries if entry["id"] == old_id)
+        assert old["disabled"] is True
+        assert old["status"] == "superseded"
+        assert old["superseded_by"] == new_id
+        assert store.count == 1
+    print("12. Semantic supersede lifecycle: OK")
+
+
+def test_episodic_duplicate_refreshes_existing_entry(tmp_path):
+    with patch("miniharness.memory.base.get_memory_dir", return_value=tmp_path):
+        store = EpisodicStore("/fake/project", max_entries=100, ttl_seconds=None)
+
+        id1 = store.log(
+            task="Refactored auth module",
+            summary="Extracted JWT logic into middleware.py",
+            files_touched=["src/auth.py"],
+            outcome="partial",
+        )
+        time.sleep(0.01)
+        id2 = store.log(
+            task="Refactored auth module",
+            summary="Extracted JWT logic into middleware.py",
+            files_touched=["src/auth.py"],
+            outcome="success",
+        )
+
+        assert id1 == id2
+        entries = store.list_all(limit=50)
+        assert len(entries) == 1
+        assert entries[0]["outcome"] == "success"
+        assert entries[0]["source"] == "manual"
+    print("13. Episodic duplicate refresh: OK")
+
+
 # ===================================================================
 if __name__ == "__main__":
     import tempfile
@@ -246,8 +314,11 @@ if __name__ == "__main__":
         test_semantic_defaults()
         test_prune_empty(tmp_path)
         test_corrupt_json(tmp_path)
+        test_semantic_duplicate_refreshes_existing_entry(tmp_path)
+        test_semantic_supersedes_disables_old_entry(tmp_path)
+        test_episodic_duplicate_refreshes_existing_entry(tmp_path)
         print()
-        print("=== ALL 10 memory system integration tests passed! ===")
+        print("=== ALL memory system integration tests passed! ===")
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

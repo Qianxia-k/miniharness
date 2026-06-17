@@ -89,7 +89,12 @@ from miniharness.llm import (
 )
 from miniharness.mcp import McpClientManager, load_mcp_server_configs
 from miniharness.memory.core import CoreMemory
-from miniharness.messages import Conversation, Message
+from miniharness.messages import (
+    Conversation,
+    Message,
+    normalize_tool_arguments,
+    normalize_tool_calls,
+)
 from miniharness.permissions import PermissionChecker
 from miniharness.plugins import load_plugins
 from miniharness.plugins.gating import is_tool_visible
@@ -185,12 +190,25 @@ class AgentLoop:
         self.model = model
 
         # ── Collaborators (each owns one clear responsibility) ─────────
-        self.llm = LLMClient(
-            profile=provider_profile,
-            model=model,
-            base_url=base_url,
-            agent_settings=settings.agent,
-        )
+        if provider_profile.api_format == "anthropic":
+            from miniharness.api.anthropic_client import AnthropicClient
+            self._anthropic = AnthropicClient(
+                api_key=provider_profile.resolve_api_key(),
+                model=model,
+                max_tokens=settings.agent.max_tokens or 4096,
+                timeout=settings.agent.request_timeout,
+            )
+            self.llm = None
+            self._stream_fn = self._anthropic.stream
+        else:
+            self._anthropic = None
+            self.llm = LLMClient(
+                profile=provider_profile,
+                model=model,
+                base_url=base_url,
+                agent_settings=settings.agent,
+            )
+            self._stream_fn = self.llm.stream
         self.permissions = PermissionChecker(cwd=cwd)
 
         # ── Plugins: load first — all downstream loaders consume them ──
@@ -241,7 +259,7 @@ class AgentLoop:
         self.core_memory = CoreMemory(cwd)
         self.compiler = ContextCompiler(
             budget=self.budget,
-            llm_stream=self.llm.stream,
+            llm_stream=self._stream_fn,
             keep_last_n_turns=settings.keep_last_n_turns,
         )
 
@@ -253,7 +271,7 @@ class AgentLoop:
             registry=self.hook_registry,
             context=HookExecutionContext(
                 cwd=cwd,
-                llm_stream=self.llm.stream,
+                llm_stream=self._stream_fn,
             ),
         )
 
@@ -440,6 +458,7 @@ class AgentLoop:
             try:
                 arguments = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError:
+                tool_call["function"]["arguments"] = normalize_tool_arguments(raw_args)
                 self.conversation.append(Message(
                     role="tool",
                     content=f"Invalid JSON arguments: {raw_args}",
@@ -562,7 +581,7 @@ class AgentLoop:
 
     def export_messages(self) -> list[dict]:
         """Export all messages as JSON-serializable dicts."""
-        return [msg.model_dump() for msg in self.conversation.messages]
+        return [msg.to_openai() for msg in self.conversation.messages]
 
     def restore_messages(self, messages_data: list[dict]) -> None:
         """Replace the conversation with previously-saved messages.
@@ -571,12 +590,18 @@ class AgentLoop:
         """
         self.conversation = Conversation()
         for data in messages_data:
-            self.conversation.append(Message(**data))
+            message = Message(**data)
+            if message.tool_calls:
+                message.tool_calls = normalize_tool_calls(message.tool_calls)
+            self.conversation.append(message)
 
     def set_model(self, model: str) -> None:
         """Switch the model and update dependent components."""
         self.model = model
-        self.llm.model = model
+        if self.llm is not None:
+            self.llm.model = model
+        if self._anthropic is not None:
+            self._anthropic.model = model
         self.budget = ContextBudget.for_model(
             model, ratio=self.settings.context_budget_ratio
         )
@@ -608,11 +633,14 @@ class AgentLoop:
         _console = Console()
 
         response_message = None
-        async for event in self.llm.stream(
-            messages=messages,
-            tools=tools,
-            max_tokens_override=max_tokens_override,
-        ):
+        # Anthropic needs system_prompt as a separate parameter.
+        stream_kwargs: dict = {"messages": messages, "tools": tools}
+        if max_tokens_override is not None:
+            stream_kwargs["max_tokens_override"] = max_tokens_override
+        if self._anthropic is not None:
+            stream_kwargs["system_prompt"] = self.conversation.messages[0].content if self.conversation.messages else ""
+
+        async for event in self._stream_fn(**stream_kwargs):
             if isinstance(event, TextDelta):
                 _console.print(event.text, end="")
             elif isinstance(event, StreamComplete):
@@ -647,16 +675,16 @@ class AgentLoop:
         """Expose the MCP manager for /mcp command introspection."""
         return self._mcp_manager
 
+    @property
+    def stream_fn(self):
+        """Return the active model stream function for runtime services."""
+        return self._stream_fn
+
     def _replace_conversation(self, messages: list[dict]) -> None:
         """Replace the live conversation with a compacted message list."""
         self.conversation = Conversation()
         for m in messages:
             self.conversation.append(Message(**m))
-
-
-# ---------------------------------------------------------------------------
-# MCP diagnostics (called from run())
-# ---------------------------------------------------------------------------
 
 
 def _print_mcp_diagnostics(mcp_manager) -> None:

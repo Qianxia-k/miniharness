@@ -38,6 +38,7 @@ class AgentSettings:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    request_timeout: float = 30.0
 
 
 @dataclass

@@ -307,7 +307,12 @@ async def _run_repl(
 async def _run_cli_agent(loop: AgentLoop, prompt: str) -> str:
     """Renderer adapter used by the shared runtime for CLI turns."""
     try:
-        return await loop.run(prompt)
+        console.print("[dim]Thinking...[/dim]")
+        result = await loop.run(prompt)
+        if _should_print_non_streamed_result(result):
+            style = "red" if _is_error_result(result) else "yellow"
+            console.print(result, style=style)
+        return result
     except asyncio.CancelledError:
         console.print("\n[yellow]Cancelled current turn.[/yellow]")
         return "Cancelled current turn."
@@ -320,3 +325,21 @@ async def _print_cli_system(message: str) -> None:
 
 async def _clear_cli_output() -> None:
     console.clear()
+
+
+def _is_error_result(result: str) -> bool:
+    prefixes = (
+        "API error:",
+        "Network error:",
+        "Error:",
+        "Hook blocked:",
+        "No response from model.",
+        "Reached maximum turns",
+    )
+    return result.startswith(prefixes)
+
+
+def _should_print_non_streamed_result(result: str) -> bool:
+    if not result:
+        return False
+    return _is_error_result(result)

@@ -58,6 +58,15 @@ PROFILES: dict[str, ProviderProfile] = {
         default_model="gpt-4.1-mini",
         context_window=131072,  # 128K
     ),
+    "anthropic": ProviderProfile(
+        name="anthropic",
+        label="Anthropic (Claude)",
+        provider="anthropic",
+        api_format="anthropic",
+        api_key_env="ANTHROPIC_API_KEY",
+        default_model="claude-sonnet-4-6",
+        context_window=200000,
+    ),
     "openai-compatible": ProviderProfile(
         name="openai-compatible",
         label="OpenAI-Compatible API",

@@ -212,6 +212,80 @@ def test_frontmatter_edge_cases():
     print("10. Frontmatter edge cases: OK")
 
 
+def test_skill_description_prefers_named_overview_section():
+    content = """# deploy-helper
+
+![badge](https://example.com/badge.svg)
+
+## Usage
+
+Run this skill when deploying.
+
+## Overview
+
+Use this skill when you need a cautious production deployment workflow that
+checks config, validates tests, prepares rollback notes, and summarizes risk.
+
+## Examples
+
+```bash
+deploy prod
+```
+"""
+    meta = parse_skill_frontmatter(content, default_name="deploy-helper")
+
+    assert meta["name"] == "deploy-helper"
+    assert meta["description"].startswith("Use this skill when you need")
+    assert "rollback notes" in meta["description"]
+    assert "deploy prod" not in meta["description"]
+
+
+def test_skill_description_skips_boilerplate_and_uses_best_paragraph():
+    content = """# research
+
+<!-- generated docs -->
+
+- [Usage](#usage)
+- [Examples](#examples)
+
+This skill helps the coding agent research unfamiliar APIs, compare primary
+sources, and turn the result into implementation-ready notes.
+
+## Usage
+
+Call it before changing integrations.
+"""
+    meta = parse_skill_frontmatter(content, default_name="research")
+
+    assert meta["description"].startswith("This skill helps")
+    assert "primary sources" in meta["description"]
+
+
+def test_frontmatter_block_scalar_description_is_parsed():
+    content = """---
+name: nature-academic-search
+description: >-
+  Multi-source literature search, citation verification, MeSH search strategy,
+  citation file management, and reference management via MCP tools.
+  Use when the user needs coordinated multi-step literature workflows.
+version: 2.0.0
+---
+
+# Academic Search
+
+---
+
+Body horizontal rule must not affect frontmatter parsing.
+"""
+    meta = parse_skill_frontmatter(content)
+
+    assert meta["name"] == "nature-academic-search"
+    assert meta["description"].startswith("Multi-source literature search")
+    assert "coordinated multi-step literature workflows" in meta["description"]
+    assert meta["description"] != ">-"
+    assert meta["body"].startswith("# Academic Search")
+
+
 # ===================================================================
 # Test 11: Tool registry includes skill tool
 # ===================================================================

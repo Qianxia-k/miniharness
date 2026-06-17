@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import string
 import tempfile
 import time
 from pathlib import Path
@@ -38,6 +39,13 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)
 def _tokenise(text: str) -> list[str]:
     """Split *text* into lowercase keyword tokens (≥2 chars)."""
     return [t.lower() for t in _WORD_RE.findall(text) if len(t) > 1]
+
+
+def normalize_memory_text(text: str) -> str:
+    """Normalize memory content for deterministic duplicate detection."""
+    lowered = re.sub(r"\s+", " ", text.lower())
+    table = str.maketrans("", "", string.punctuation)
+    return lowered.translate(table).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -136,19 +144,20 @@ class MemoryStore:
         (does NOT mutate in place — the caller should use the return value).
         """
         now = time.time()
+        entries = [e for e in entries if isinstance(e, dict)]
 
         # 1. Expire by TTL.
         if self.ttl_seconds is not None:
             cutoff = now - self.ttl_seconds
             entries = [
                 e for e in entries
-                if e.get("timestamp", 0) >= cutoff
+                if _entry_time(e) >= cutoff
             ]
 
         # 2. Enforce max_entries (oldest-first eviction).
         if self.max_entries is not None and len(entries) > self.max_entries:
             # Sort by timestamp ascending, keep newest.
-            entries.sort(key=lambda e: e.get("timestamp", 0))
+            entries.sort(key=_entry_time)
             entries = entries[-self.max_entries:]
 
         return entries
@@ -169,29 +178,38 @@ class MemoryStore:
         if not keywords:
             return self.list_all(limit=limit)
 
-        entries = self._read_all()
+        entries = self._active_entries(self._read_all())
         scored: list[tuple[int, float, dict[str, Any]]] = []
 
         for entry in entries:
             text = self._entry_search_text(entry)
             score = sum(2 for kw in keywords if kw in text)
             if score > 0:
-                scored.append((score, entry.get("timestamp", 0), entry))
+                scored.append((score, _entry_time(entry), entry))
 
         # Sort: score descending, then recency descending.
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [item[2] for item in scored[:limit]]
 
-    def list_all(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list_all(self, *, limit: int = 20, include_disabled: bool = False) -> list[dict[str, Any]]:
         """Return entries, newest first, up to *limit*."""
         entries = self._read_all()
-        entries.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+        if not include_disabled:
+            entries = self._active_entries(entries)
+        entries.sort(key=_entry_time, reverse=True)
         return entries[:limit]
 
     @property
     def count(self) -> int:
-        """Return the current number of stored entries."""
-        return len(self._read_all())
+        """Return the current number of active stored entries."""
+        return len(self._active_entries(self._read_all()))
+
+    def _active_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            entry for entry in entries
+            if not entry.get("disabled")
+            and entry.get("status", "active") not in {"superseded", "archived", "disabled"}
+        ]
 
     # ------------------------------------------------------------------
     # Subclass contract
@@ -206,3 +224,11 @@ class MemoryStore:
         raise NotImplementedError(
             f"{type(self).__name__} must override _entry_search_text()"
         )
+
+
+def _entry_time(entry: dict[str, Any]) -> float:
+    for key in ("updated_at", "timestamp", "created_at"):
+        value = entry.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return 0.0

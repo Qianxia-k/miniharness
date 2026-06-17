@@ -1,7 +1,8 @@
-"""TUI frontend — Textual app for MiniHarness.
+"""Textual frontend for MiniHarness.
 
-Spawns ``--backend-only`` as a subprocess, reads ``MHJSON:`` events from
-stdout, renders them in a clean terminal UI.
+The TUI is a renderer over the backend protocol.  It does not own agent
+business logic; prompts, slash commands, sessions, tools, permissions, and
+memory extraction all flow through ``BackendHost`` and ``RuntimeController``.
 """
 
 from __future__ import annotations
@@ -11,115 +12,139 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
+from rich.panel import Panel
+from textual import events, on
 from textual.app import App, ComposeResult
-from textual.containers import Container, VerticalScroll
-from textual.widgets import Header, Input, Label, Static
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual import events
+from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
 from miniharness.ui.protocol import decode_event
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Permission Modal — clean, minimal
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class PermissionModal(ModalScreen[bool]):
-    """Prompt the user for permission (y/n)."""
+    """Permission prompt overlay for mutating tools."""
 
     DEFAULT_CSS = """
     PermissionModal {
         align: center middle;
     }
-    #perm-box {
-        width: 56;
+    #permission-dialog {
+        width: 64;
         height: auto;
         padding: 1 2;
-        border: solid grey;
-        background: black;
+        border: round green;
     }
-    #perm-title {
-        width: 100%;
-        text-align: center;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    #perm-body {
-        width: 100%;
-        margin-bottom: 1;
-    }
-    #perm-hint {
-        width: 100%;
-        text-align: center;
-        color: grey;
-        text-style: italic;
-    }
-    """
-
-    def __init__(self, tool_name: str, prompt: str) -> None:
-        super().__init__()
-        self.tool_name = tool_name
-        self.prompt = prompt
-
-    def compose(self) -> ComposeResult:
-        with Container(id="perm-box"):
-            yield Label(f"Allow {self.tool_name}?", id="perm-title")
-            yield Label(self.prompt[:200], id="perm-body")
-            yield Label("[Y] Allow  [N] Deny", id="perm-hint")
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key == "y":
-            self.dismiss(True)
-        elif event.key == "n" or event.key == "escape":
-            self.dismiss(False)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Main App
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class MiniHarnessTUI(App):
-    """Textual TUI — clean, minimal, mirrors Claude Code layout."""
-
-    CSS = """
-    #conversation {
-        height: 1fr;
-        padding: 0 1;
-    }
-    .assistant-text {
-        color: green;
-    }
-    .tool-line {
-        color: grey;
-    }
-    .tool-error {
-        color: red;
-    }
-    .user-line {
-        color: white;
-        text-style: bold;
-    }
-    .system-line {
-        color: grey;
-        text-style: italic;
-    }
-    #prompt-input {
-        dock: bottom;
-        margin: 0 0 1 0;
-    }
-    #status-line {
-        dock: bottom;
-        height: 1;
-        color: grey;
-        text-style: italic;
+    #permission-actions {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
     }
     """
 
     BINDINGS = [
-        ("ctrl+q", "quit", "Quit"),
+        Binding("y", "allow", "Allow"),
+        Binding("n", "deny", "Deny"),
+        Binding("escape", "deny", "Deny"),
+    ]
+
+    def __init__(self, tool_name: str, prompt: str) -> None:
+        super().__init__()
+        self._tool_name = tool_name
+        self._prompt = prompt
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(
+                Panel.fit(
+                    f"Allow tool [bold]{self._tool_name}[/bold]?\n\n{self._prompt[:500]}",
+                    title="Permission Required",
+                )
+            ),
+            Horizontal(
+                Button("Allow", id="allow", variant="success"),
+                Button("Deny", id="deny", variant="error"),
+                id="permission-actions",
+            ),
+            id="permission-dialog",
+        )
+
+    @on(Button.Pressed)
+    def handle_button(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "allow")
+
+    def action_allow(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "y":
+            self.dismiss(True)
+        elif event.key in ("n", "escape"):
+            self.dismiss(False)
+
+
+def _startup_requests_tui(resume_id: str | None, initial_prompt: str | None) -> list[dict]:
+    """Build initial backend requests in runtime order."""
+    requests: list[dict] = []
+    if resume_id:
+        line = "/resume" if resume_id == "latest" else f"/resume {resume_id}"
+        requests.append({"type": "submit_line", "line": line})
+    if initial_prompt:
+        requests.append({"type": "submit_line", "line": initial_prompt})
+    return requests
+
+
+class MiniHarnessTUI(App[None]):
+    """Production-oriented terminal UI for MiniHarness."""
+
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+    #main-row {
+        height: 1fr;
+    }
+    #transcript-column {
+        width: 3fr;
+        min-width: 60;
+    }
+    #side-column {
+        width: 1fr;
+        min-width: 30;
+    }
+    #transcript {
+        height: 1fr;
+        border: solid green;
+    }
+    #current-response {
+        min-height: 3;
+        max-height: 8;
+        border: round green;
+        padding: 0 1;
+    }
+    #composer {
+        dock: bottom;
+        height: 3;
+        border: solid green;
+    }
+    #status-panel, #session-panel, #memory-panel, #tool-panel {
+        border: round grey;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+c", "interrupt", "Interrupt"),
+        Binding("ctrl+l", "clear_transcript", "Clear"),
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("escape", "focus_composer", "Focus"),
     ]
 
     def __init__(
@@ -130,103 +155,89 @@ class MiniHarnessTUI(App):
         resume_session_id: str | None = None,
     ) -> None:
         super().__init__()
-        self.cwd = cwd
+        self._cwd = cwd
         self._initial_prompt = prompt
-        self._resume_id = resume_session_id
+        self._resume_session_id = resume_session_id
         self._proc: subprocess.Popen | None = None
         self._reader_task: asyncio.Task | None = None
-        self._streaming_widget: Static | None = None
-        self._streamed_text: str = ""   # fully displayed text on the widget
-        self._pending_text: str = ""    # new deltas not yet pushed to widget
-        self._flush_timer: asyncio.Task | None = None
-        self._busy: bool = False
+        self._assistant_buffer = ""
+        self._busy = False
+        self._model = "?"
+        self._session_id = ""
+        self._last_tool = "No tool calls yet."
+        self._last_memory = "No memory updates yet."
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="main-row"):
+            with Vertical(id="transcript-column"):
+                yield RichLog(id="transcript", wrap=True, highlight=True, markup=True)
+                yield Static("Ready.", id="current-response")
+                yield Input(placeholder="Ask MiniHarness or enter a /command", id="composer")
+            with Vertical(id="side-column"):
+                yield Static("Starting...", id="status-panel")
+                yield Static("Session pending.", id="session-panel")
+                yield Static("No memory updates yet.", id="memory-panel")
+                yield Static("No tool calls yet.", id="tool-panel")
+        yield Footer()
 
     def on_mount(self) -> None:
-        """Spawn backend, begin reading events."""
         cmd = [
-            sys.executable, "-m", "miniharness", "--backend-only",
-            "--cwd", str(self.cwd),
+            sys.executable,
+            "-m",
+            "miniharness",
+            "--backend-only",
+            "--cwd",
+            str(self._cwd),
         ]
         self._proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
         )
-        self._reader_task = asyncio.create_task(self._read_events())
-
-        startup_reqs = self._startup_requests()
-        if startup_reqs:
-            self._busy = True
-
-        for req in startup_reqs:
-            self._send(req)
-
-        self.query_one("#prompt-input", Input).focus()
+        self._reader_task = asyncio.create_task(self._read_backend_events())
+        for request in self._startup_requests():
+            self._send(request)
+        self.query_one("#composer", Input).focus()
 
     def on_unmount(self) -> None:
-        if self._reader_task:
+        if self._reader_task is not None:
             self._reader_task.cancel()
-        if self._proc:
+        if self._proc is not None:
             try:
                 self._send({"type": "shutdown"})
-                self._proc.stdin.close()
+                if self._proc.stdin is not None:
+                    self._proc.stdin.close()
                 self._proc.wait(timeout=3)
             except Exception:
                 self._proc.kill()
 
-    # ------------------------------------------------------------------
-    # Layout
-    # ------------------------------------------------------------------
+    def _startup_requests(self) -> list[dict]:
+        return _startup_requests_tui(self._resume_session_id, self._initial_prompt)
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        yield VerticalScroll(id="conversation")
-        yield Static("", id="status-line")
-        yield Input(placeholder="▸ Type a prompt or /command...", id="prompt-input")
-
-    # ------------------------------------------------------------------
-    # Input
-    # ------------------------------------------------------------------
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if self._busy:
-            self._status("Busy — wait for the current turn to finish.")
-            event.input.value = ""
-            return
-
+    @on(Input.Submitted, "#composer")
+    def handle_submit(self, event: Input.Submitted) -> None:
         line = event.value.strip()
         event.input.value = ""
-        if not line:
+        if not line or self._busy:
             return
         if line in ("/exit", "/quit", "/q"):
             self.exit()
             return
+        self._submit_line(line)
 
+    def _submit_line(self, line: str) -> None:
         self._busy = True
-        self._add(f"▸ {line}", "user-line")
+        composer = self.query_one("#composer", Input)
+        composer.disabled = True
+        self._append(f"[bold cyan]user>[/bold cyan] {line}")
+        self._set_current("[dim]Working...[/dim]")
         self._send({"type": "submit_line", "line": line})
 
-    def action_quit(self) -> None:
-        self.exit()
-
-    def _startup_requests(self) -> list[dict]:
-        """Build initial requests to send on mount."""
-        reqs: list[dict] = []
-        if self._resume_id:
-            line = "/resume" if self._resume_id == "latest" else f"/resume {self._resume_id}"
-            reqs.append({"type": "submit_line", "line": line})
-        if self._initial_prompt:
-            reqs.append({"type": "submit_line", "line": self._initial_prompt})
-        return reqs
-
-    # ------------------------------------------------------------------
-    # Read MHJSON: from backend stdout
-    # ------------------------------------------------------------------
-
-    async def _read_events(self) -> None:
+    async def _read_backend_events(self) -> None:
         if self._proc is None or self._proc.stdout is None:
             return
         loop = asyncio.get_event_loop()
@@ -237,162 +248,164 @@ class MiniHarnessTUI(App):
                 break
             if not raw:
                 break
-            line = raw.strip()
-            evt = decode_event(line)
-            if evt is None:
-                if line:
-                    self._add(f"[backend] {line}", "system-line")
+            event = decode_event(raw.strip())
+            if event is None:
                 continue
-            self._dispatch(evt)
+            self._dispatch_event(event)
 
-    # ------------------------------------------------------------------
-    # Event dispatch
-    # ------------------------------------------------------------------
+    def _dispatch_event(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type", "")
 
-    def _dispatch(self, evt: dict) -> None:
-        t = evt.get("type", "")
+        if event_type == "ready":
+            self._model = event.get("model", "?")
+            self._session_id = event.get("session_id", "")
+            self._append("[dim]system> backend ready[/dim]")
+            self._refresh_sidebars()
+            return
 
-        if t == "ready":
-            m = evt.get("model", "?")
-            s = (evt.get("session_id", "") or "")[:12]
-            self._status(f"Model: {m}  |  Session: {s}")
+        if event_type == "assistant_delta":
+            self._assistant_buffer += event.get("text", "")
+            self._set_current(f"[bold]assistant>[/bold] {self._assistant_buffer}")
+            return
 
-        elif t == "assistant_delta":
-            self._pending_text += evt.get("text", "")
+        if event_type == "assistant_complete":
+            text = self._assistant_buffer or event.get("text", "") or "(empty response)"
+            self._append(f"[bold green]assistant>[/bold green] {text}")
+            self._assistant_buffer = ""
+            self._set_current("Ready.")
+            return
 
-            if self._streaming_widget is None:
-                self._streaming_widget = Static("", classes="assistant-text")
-                self.query_one("#conversation", VerticalScroll).mount(self._streaming_widget)
+        if event_type == "tool_started":
+            name = event.get("tool_name", "?")
+            tool_input = event.get("tool_input", {})
+            payload = json.dumps(tool_input, ensure_ascii=False)[:240]
+            self._last_tool = f"{name}\n{payload}"
+            self._append(f"[dim]tool> {name} {payload}[/dim]")
+            self._refresh_sidebars()
+            return
 
-            if self._flush_timer is None:
-                self._schedule_flush()
+        if event_type == "tool_completed":
+            name = event.get("tool_name", "?")
+            output = (event.get("output", "") or "").replace("\n", " ")
+            is_error = bool(event.get("is_error", False))
+            prefix = "tool-error>" if is_error else "tool-result>"
+            self._last_tool = f"{name}\n{output[:500]}"
+            style = "red" if is_error else "grey50"
+            self._append(f"[{style}]{prefix} {name}: {output[:500]}[/{style}]")
+            self._refresh_sidebars()
+            return
 
-        elif t == "assistant_complete":
-            self._flush_now(reschedule=False)
-            self._streaming_widget = None
-            self._streamed_text = ""
-            self._pending_text = ""
-            self._clear_busy()
+        if event_type == "system_message":
+            message = event.get("message", "")
+            if message:
+                if message.startswith("Memory updated:"):
+                    self._last_memory = message
+                    self._refresh_sidebars()
+                self._append(f"[dim]system> {message}[/dim]")
+            return
 
-        elif t == "tool_started":
-            name = evt.get("tool_name", "?")
-            inp = evt.get("tool_input", {})
-            s = json.dumps(inp, ensure_ascii=False)[:120]
-            self._add(f"  → {name}({s})", "tool-line")
+        if event_type == "status":
+            message = event.get("message", "")
+            if message:
+                self._set_current("[dim]Ready.[/dim]")
+                self._refresh_sidebars(extra_status=message)
+            return
 
-        elif t == "tool_completed":
-            out = (evt.get("output", "") or "")[:120].replace("\n", " ")
-            cls = "tool-error" if evt.get("is_error") else "tool-line"
-            self._add(f"  ← {out}", cls)
+        if event_type == "permission_request":
+            self._handle_permission_request(event)
+            return
 
-        elif t == "permission_request":
-            rid = evt.get("request_id", "")
-            tn = evt.get("tool_name", "")
-            p = evt.get("prompt", "")
+        if event_type == "error":
+            self._append(f"[red]error> {event.get('message', '')}[/red]")
+            self._finish_line()
+            return
 
-            def _done(allowed: bool) -> None:
-                self._send({"type": "permission_response", "request_id": rid, "allowed": allowed})
-                self._status(f"{tn}: {'allowed' if allowed else 'denied'}")
+        if event_type == "line_complete":
+            self._finish_line()
+            return
 
-            self.push_screen(PermissionModal(tn, p), _done)
+        if event_type == "shutdown":
+            self._append("[dim]system> backend shutdown[/dim]")
+            self.exit()
 
-        elif t == "system_message":
-            # Multiline system output (e.g., /help) → show in conversation.
-            msg = evt.get("message", "") or ""
-            self._add(msg, "system-line")
+    def _handle_permission_request(self, event: dict[str, Any]) -> None:
+        request_id = event.get("request_id", "")
+        tool_name = event.get("tool_name", "")
+        prompt = event.get("prompt", "")
 
-        elif t == "status":
-            self._status((evt.get("message", "") or "")[:120])
+        def _done(allowed: bool | None) -> None:
+            self._send({
+                "type": "permission_response",
+                "request_id": request_id,
+                "allowed": bool(allowed),
+            })
+            label = "allowed" if allowed else "denied"
+            self._append(f"[dim]permission> {tool_name}: {label}[/dim]")
 
-        elif t == "error":
-            self._add(f"Error: {evt.get('message', '')}", "tool-error")
-            self._clear_busy()
+        self.push_screen(PermissionModal(tool_name, prompt), _done)
 
-        elif t == "shutdown":
-            self._add("Backend shut down.", "system-line")
-            self._clear_busy()
-
-        elif t == "line_complete":
-            self._clear_busy()
-
-    # ------------------------------------------------------------------
-    # Streaming flush (80ms timer, like OpenHarness's double-buffer)
-    # ------------------------------------------------------------------
-
-    def _schedule_flush(self) -> None:
-        """Schedule a flush of pending assistant text after 80ms."""
-        async def _flush_after_delay() -> None:
-            await asyncio.sleep(0.08)
-            self._flush_now()
-
-        self._flush_timer = asyncio.create_task(_flush_after_delay())
-
-    def _flush_now(self, *, reschedule: bool = True) -> None:
-        """Push pending deltas to the streaming widget."""
-        if self._flush_timer is not None:
-            self._flush_timer.cancel()
-            self._flush_timer = None
-
-        if self._pending_text and self._streaming_widget is not None:
-            self._streamed_text += self._pending_text
-            try:
-                self._streaming_widget.update(self._streamed_text)
-                self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
-            except Exception as exc:
-                print(f"TUI render error: {exc}", file=sys.stderr)
-
-        self._pending_text = ""
-
-        if reschedule and self._streaming_widget is not None:
-            self._schedule_flush()
-
-    # ------------------------------------------------------------------
-    # Busy state
-    # ------------------------------------------------------------------
-
-    def _clear_busy(self) -> None:
+    def _finish_line(self) -> None:
         self._busy = False
-        try:
-            self.query_one("#prompt-input", Input).focus()
-        except Exception:
-            pass
+        composer = self.query_one("#composer", Input)
+        composer.disabled = False
+        composer.focus()
+        if not self._assistant_buffer:
+            self._set_current("Ready.")
+        self._refresh_sidebars()
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def action_interrupt(self) -> None:
+        if self._busy:
+            self._send({"type": "interrupt"})
 
-    def _add(self, text: str, css_class: str) -> None:
-        try:
-            self.query_one("#conversation", VerticalScroll).mount(
-                Label(text, classes=css_class) if css_class else Label(text)
-            )
-            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
-        except Exception as exc:
-        # during development
-            print(f"TUI render error: {exc}", file=sys.stderr)
+    def action_clear_transcript(self) -> None:
+        self.query_one("#transcript", RichLog).clear()
+        self._set_current("Transcript cleared.")
 
-    def _status(self, text: str) -> None:
-        try:
-            self.query_one("#status-line", Static).update(text[:120])
-        except Exception as exc:
-            # during development
-            print(f"TUI render error: {exc}", file=sys.stderr)
-            pass
+    def action_focus_composer(self) -> None:
+        self.query_one("#composer", Input).focus()
 
-    def _send(self, msg: dict) -> None:
+    def action_quit(self) -> None:
+        self.exit()
+
+    def _append(self, message: str) -> None:
+        self.query_one("#transcript", RichLog).write(message)
+
+    def _set_current(self, message: str) -> None:
+        self.query_one("#current-response", Static).update(message)
+
+    def _refresh_sidebars(self, *, extra_status: str = "") -> None:
+        status_lines = [
+            "[b]Status[/b]",
+            f"model: {self._model}",
+            f"cwd: {self._cwd}",
+        ]
+        if extra_status:
+            status_lines.append(extra_status)
+        self.query_one("#status-panel", Static).update("\n".join(status_lines))
+        self.query_one("#session-panel", Static).update(
+            "\n".join(["[b]Session[/b]", self._session_id or "(pending)"])
+        )
+        self.query_one("#memory-panel", Static).update(
+            "\n".join(["[b]Memory[/b]", self._last_memory])
+        )
+        self.query_one("#tool-panel", Static).update(
+            "\n".join(["[b]Last Tool[/b]", self._last_tool])
+        )
+
+    def _send(self, message: dict) -> None:
         if self._proc is None or self._proc.stdin is None:
             return
         try:
-            self._proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            self._proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Entry point
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def run_tui(*, cwd: Path, prompt: str | None = None, resume_session_id: str | None = None) -> None:
+def run_tui(
+    *,
+    cwd: Path,
+    prompt: str | None = None,
+    resume_session_id: str | None = None,
+) -> None:
     MiniHarnessTUI(cwd=cwd, prompt=prompt, resume_session_id=resume_session_id).run()

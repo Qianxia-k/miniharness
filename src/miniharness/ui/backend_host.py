@@ -199,7 +199,7 @@ class BackendHost:
     async def _run_agent_impl(self, loop: AgentLoop, prompt: str) -> str:
 
         # ── Hook: LLM stream → assistant_delta events ──────────────
-        original_stream = loop.llm.stream
+        original_stream = loop.stream_fn
 
         async def _stream_wrapper(*a, **kw):
             async for evt in original_stream(*a, **kw):
@@ -208,7 +208,7 @@ class BackendHost:
                     continue  # suppress — don't let _call_llm console.print() raw text
                 yield evt
 
-        loop.llm.stream = _stream_wrapper
+        loop._stream_fn = _stream_wrapper
 
         # ── Hook: tool execution → tool_started/tool_completed ────
         original_exec = loop._execute_tools
@@ -242,8 +242,12 @@ class BackendHost:
         try:
             result = await loop.run(prompt)
         finally:
-            loop.llm.stream = original_stream
+            loop._stream_fn = original_stream
             loop._execute_tools = original_exec
+
+        if _is_error_result(result):
+            self._emit(ErrorEvent(message=result))
+            return result
 
         self._emit(AssistantComplete(text=result))
         return result
@@ -278,3 +282,14 @@ class BackendHost:
     def _emit(self, event) -> None:
         sys.stdout.write(encode_event(event) + "\n")
         sys.stdout.flush()
+
+
+def _is_error_result(result: str) -> bool:
+    return result.startswith((
+        "API error:",
+        "Network error:",
+        "Error:",
+        "Hook blocked:",
+        "No response from model.",
+        "Reached maximum turns",
+    ))

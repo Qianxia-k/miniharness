@@ -63,6 +63,7 @@ class RuntimeController:
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
+    _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self.cwd = self.cwd.expanduser().resolve()
@@ -84,6 +85,8 @@ class RuntimeController:
 
     async def close(self) -> None:
         """Close runtime-owned resources."""
+        await self.drain_background_tasks(timeout=1.0)
+
         mcp = getattr(self.loop, "_mcp_manager", None)
         if mcp is not None:
             try:
@@ -99,6 +102,24 @@ class RuntimeController:
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
             self._sandbox_started = False
+
+    async def drain_background_tasks(self, *, timeout: float | None = None) -> None:
+        """Wait briefly for best-effort background work, then cancel leftovers."""
+        if not self._background_tasks:
+            return
+        tasks = set(self._background_tasks)
+        try:
+            if timeout is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                done, pending = await asyncio.wait(tasks, timeout=timeout)
+                await asyncio.gather(*done, return_exceptions=True)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            self._background_tasks.difference_update(tasks)
 
     async def handle_line(
         self,
@@ -136,6 +157,7 @@ class RuntimeController:
 
         await run_agent(self.loop, stripped)
         save_loop_snapshot(self.loop)
+        self._schedule_memory_extraction(print_system)
         return True
 
     async def _render_command_result(
@@ -155,11 +177,49 @@ class RuntimeController:
         if result.submit_prompt:
             await run_agent(self.loop, result.submit_prompt)
             save_loop_snapshot(self.loop)
+            self._schedule_memory_extraction(print_system)
         if result.refresh_runtime and clear_output is not None:
             # cmd_clear already mutated the loop; the frontend transcript should
             # match that cleared conversation.
             if result.message and "cleared" in result.message.lower():
                 await clear_output()
+
+    def _schedule_memory_extraction(self, print_system: SystemPrinter) -> None:
+        """Start best-effort post-turn memory extraction without blocking input."""
+        messages = self.loop.conversation.to_openai()
+        stream_fn = self.loop.stream_fn
+        task = asyncio.create_task(
+            self._extract_memories(messages, stream_fn, print_system)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _extract_memories(
+        self,
+        messages: list[dict],
+        stream_fn,
+        print_system: SystemPrinter,
+    ) -> None:
+        """Run post-turn memory extraction in the background."""
+        try:
+            from miniharness.services.memory_extractor import extract_memories_from_turn
+
+            result = await asyncio.wait_for(
+                extract_memories_from_turn(
+                    messages=messages,
+                    llm=stream_fn,
+                    cwd=self.cwd,
+                ),
+                timeout=20.0,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return
+        except Exception:
+            return
+
+        message = _format_memory_extraction_result(result)
+        if message:
+            await print_system(message)
 
     async def _replace_loop(self, new_loop: AgentLoop) -> None:
         old_mcp = getattr(self.loop, "_mcp_manager", None)
@@ -261,3 +321,35 @@ class RuntimeController:
             self.loop.tag = tag
             return CommandResult.ok(f"Session {self.loop.session_id} tagged as '{tag}'.", should_save=True)
         return CommandResult.ok(f"Could not tag session '{tag}'.")
+
+
+def _format_memory_extraction_result(result) -> str:
+    """Format memory extraction output for any frontend renderer."""
+    if getattr(result, "skipped", False):
+        return ""
+
+    facts = getattr(result, "facts", []) or []
+    episode = getattr(result, "episode", None)
+    if not facts and not episode:
+        return ""
+
+    lines = ["Memory updated:"]
+    if episode:
+        task = str(episode.get("task", "")).strip()
+        outcome = str(episode.get("outcome", "")).strip()
+        if task:
+            suffix = f" [{outcome}]" if outcome else ""
+            lines.append(f"- episode: {task}{suffix}")
+        summary = str(episode.get("summary", "")).strip()
+        if summary:
+            lines.append(f"  {summary[:160]}")
+
+    if facts:
+        lines.append(f"- facts remembered: {len(facts)}")
+        for item in facts[:3]:
+            if isinstance(item, dict):
+                fact = str(item.get("fact", "")).strip()
+                if fact:
+                    lines.append(f"  - {fact[:120]}")
+
+    return "\n".join(lines)

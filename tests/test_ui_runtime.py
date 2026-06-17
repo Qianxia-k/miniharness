@@ -69,6 +69,50 @@ async def test_runtime_prompt_calls_agent_and_saves_session(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_memory_extraction_reports_via_system_message(tmp_path: Path, monkeypatch):
+    from miniharness.services.memory_extractor import ExtractionResult
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+
+    async def fake_extract_memories_from_turn(**kwargs):
+        return ExtractionResult(
+            facts=[{"fact": "MiniHarness TUI uses shared RuntimeController", "tags": ["ui"]}],
+            episode={
+                "task": "Unified UI runtime",
+                "summary": "Moved memory extraction into the shared runtime pipeline.",
+                "outcome": "success",
+            },
+        )
+
+    monkeypatch.setattr(
+        "miniharness.services.memory_extractor.extract_memories_from_turn",
+        fake_extract_memories_from_turn,
+    )
+
+    async def run_agent(loop, prompt: str) -> str:
+        loop.conversation.append(Message(role="user", content=prompt))
+        loop.conversation.append(Message(role="assistant", content="done"))
+        return "done"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        await runtime.handle_line(
+            "build the tui",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+        await runtime.drain_background_tasks()
+    finally:
+        await runtime.close()
+
+    assert any("Memory updated:" in message for message in system_messages)
+    assert any("Unified UI runtime" in message for message in system_messages)
+
+
+@pytest.mark.asyncio
 async def test_runtime_resume_switches_loop_without_agent_call(tmp_path: Path):
     save_session_snapshot(
         cwd=str(tmp_path),
@@ -179,14 +223,14 @@ async def test_backend_run_agent_stream_wrapper_remains_async_iterator(tmp_path:
     async def fake_run(prompt: str) -> str:
         runtime.loop.conversation.append(Message(role="user", content=prompt))
         response = None
-        async for event in runtime.loop.llm.stream(messages=[], tools=[]):
+        async for event in runtime.loop.stream_fn(messages=[], tools=[]):
             if isinstance(event, StreamComplete):
                 response = event.message
         assert response is not None
         runtime.loop.conversation.append(response)
         return response.content or ""
 
-    runtime.loop.llm.stream = fake_stream  # type: ignore[method-assign]
+    runtime.loop._stream_fn = fake_stream  # type: ignore[attr-defined]
     runtime.loop.run = fake_run  # type: ignore[method-assign]
 
     try:
@@ -197,3 +241,26 @@ async def test_backend_run_agent_stream_wrapper_remains_async_iterator(tmp_path:
     assert result == "ok"
     assert any(getattr(evt, "type", "") == "assistant_delta" and evt.text == "ok" for evt in emitted)
     assert any(isinstance(evt, AssistantComplete) and evt.text == "ok" for evt in emitted)
+
+
+@pytest.mark.asyncio
+async def test_backend_agent_error_result_emits_error_event(tmp_path: Path):
+    host = BackendHost(cwd=tmp_path, settings=Settings())
+    emitted: list[object] = []
+    host._emit = emitted.append  # type: ignore[method-assign]
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+
+    async def fake_run(prompt: str) -> str:
+        runtime.loop.conversation.append(Message(role="user", content=prompt))
+        return "API error: boom"
+
+    runtime.loop.run = fake_run  # type: ignore[method-assign]
+
+    try:
+        result = await host._run_agent(runtime.loop, "hello")
+    finally:
+        await runtime.close()
+
+    assert result == "API error: boom"
+    assert any(getattr(evt, "type", "") == "error" and "boom" in evt.message for evt in emitted)
+    assert not any(isinstance(evt, AssistantComplete) for evt in emitted)

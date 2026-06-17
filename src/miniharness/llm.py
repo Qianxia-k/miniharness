@@ -245,7 +245,9 @@ class LLMClient:
 
     def _create_client(self) -> AsyncOpenAI:
         return AsyncOpenAI(
-            api_key=self.profile.resolve_api_key(), base_url=self.base_url
+            api_key=self.profile.resolve_api_key(),
+            base_url=self.base_url,
+            timeout=self.agent_settings.request_timeout,
         )
 
     def _build_params(
@@ -338,11 +340,12 @@ class LLMClient:
 
                 if attempt == self._MAX_RETRIES or not self._is_retryable(exc):
                     raise
+                delay = self._retry_delay(attempt)
                 _stderr.print(
                     f"[yellow]API error (attempt {attempt + 1}/{self._MAX_RETRIES + 1}), "
-                    f"retrying in {self._retry_delay(attempt):.1f}s: {exc}[/yellow]"
+                    f"retrying in {delay:.1f}s: {exc}[/yellow]"
                 )
-                await self._retry_sleep(attempt)
+                await asyncio.sleep(delay)
 
         # --- consume the stream ---
         content_parts: list[str] = []

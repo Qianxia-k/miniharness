@@ -3,8 +3,8 @@
 Three tools:
 
 - ``memory_search``  — read-only, always allowed.  Searches both stores.
-- ``memory_add``    — append a fact to semantic memory.  Auto-allowed.
-- ``memory_log``    — record a completed task to episodic memory.  Auto-allowed.
+- ``memory_add``    — store/update a semantic fact.  Auto-allowed.
+- ``memory_log``    — record/update a completed task episode.  Auto-allowed.
 
 Memory writes are auto-allowed because memory is agent-managed metadata,
 not user files.  The user can inspect and edit memory via ``/memory``.
