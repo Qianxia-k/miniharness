@@ -10,39 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Token estimation (no tiktoken dependency — ~4 chars / token is the
-# industry-standard heuristic for mixed English + code text).
-# ---------------------------------------------------------------------------
-
-_CHARS_PER_TOKEN = 4.0
+from miniharness.services.token_estimation import (
+    estimate_message_tokens,
+    tokenizer_name_for_model,
+)
 
 
-def count_tokens(messages: list[dict[str, Any]]) -> int:
-    """Estimate the token count of an OpenAI-format message list.
-
-    Counts content strings, tool call JSON, and adds a small per-message
-    overhead for role / framing tokens (~4 tokens / message).
-    """
-    total = 0
-    for msg in messages:
-        total += 4  # per-message framing overhead
-        content = msg.get("content") or ""
-        if isinstance(content, str):
-            total += max(1, len(content) / _CHARS_PER_TOKEN)
-        elif isinstance(content, list):
-            # Multi-modal content blocks.
-            for block in content:
-                if isinstance(block, dict) and "text" in block:
-                    total += max(1, len(block["text"]) / _CHARS_PER_TOKEN)
-
-        # Tool calls in assistant messages.
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function", {})
-            total += max(1, len(fn.get("name", "")) / _CHARS_PER_TOKEN)
-            total += max(1, len(fn.get("arguments", "")) / _CHARS_PER_TOKEN)
-
-    return int(total)
+def count_tokens(messages: list[dict[str, Any]], *, model: str | None = None) -> int:
+    """Estimate the token count of an OpenAI-format message list."""
+    return estimate_message_tokens(messages, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +81,8 @@ class ContextBudget:
     ratio: float = 0.8     # trigger compaction at 80% usage
 
     # Estimated fixed overhead per API call.
-    system_prompt_tokens: int = 500
-    tool_def_tokens: int = 1500
+    system_prompt_tokens: int = 0
+    tool_def_tokens: int = 0
     response_reserve_tokens: int = 4000
 
     @classmethod
@@ -134,14 +110,67 @@ class ContextBudget:
         """Tokens available for conversation messages."""
         return max(0, self.max_tokens - self.fixed_overhead)
 
-    def tokens_used(self, messages: list[dict[str, Any]]) -> int:
+    def tokens_used(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> int:
         """Total estimated tokens for the full API call."""
-        return self.fixed_overhead + count_tokens(messages)
+        return (
+            self.response_reserve_tokens
+            + count_tokens(messages, model=self.model)
+            + self.tool_tokens(tools or [])
+        )
 
-    def usage_ratio(self, messages: list[dict[str, Any]]) -> float:
+    def usage_ratio(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> float:
         """Fraction of the soft cap currently consumed (0.0 – 1.0+)."""
-        return self.tokens_used(messages) / self.max_tokens
+        return self.tokens_used(messages, tools=tools) / self.max_tokens
 
-    def is_over_budget(self, messages: list[dict[str, Any]]) -> bool:
+    def is_over_budget(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Return True when the conversation should be compacted."""
-        return self.tokens_used(messages) > self.available
+        return self.tokens_used(messages, tools=tools) > self.max_tokens
+
+    def tool_tokens(self, tools: list[dict[str, Any]]) -> int:
+        """Estimate tool schema tokens for diagnostics and UI display."""
+        if not tools:
+            return 0
+        pseudo_messages = [{"role": "system", "content": tools}]
+        return count_tokens(pseudo_messages, model=self.model)
+
+    def snapshot(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return structured token budget metadata for UI/status events."""
+        message_tokens = count_tokens(messages, model=self.model)
+        tool_tokens = self.tool_tokens(tools or [])
+        total_used = self.response_reserve_tokens + message_tokens + tool_tokens
+        ratio = total_used / self.max_tokens if self.max_tokens else 0.0
+        return {
+            "model": self.model,
+            "tokenizer": tokenizer_name_for_model(self.model),
+            "context_window": self.total,
+            "soft_limit": self.max_tokens,
+            "response_reserve_tokens": self.response_reserve_tokens,
+            "message_tokens": message_tokens,
+            "tool_tokens": tool_tokens,
+            "total_used": total_used,
+            "token_count": total_used,
+            "available": max(0, self.max_tokens - total_used),
+            "usage_ratio": ratio,
+            "budget_ratio": ratio,
+            "over_budget": total_used > self.max_tokens,
+        }

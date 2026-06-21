@@ -19,7 +19,7 @@ them through to the compactor without knowing anything about their contents.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from miniharness.context.budget import ContextBudget
 from miniharness.context.compactor import auto_compact_if_needed
@@ -52,10 +52,12 @@ class ContextCompiler:
         budget: ContextBudget,
         llm_stream,
         keep_last_n_turns: int = 3,
+        compact_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.budget = budget
         self.llm_stream = llm_stream
         self.keep_last_n_turns = keep_last_n_turns
+        self.compact_progress = compact_progress
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,21 +90,25 @@ class ContextCompiler:
         msgs = _ensure_system_prompt(msgs)
 
         stats = self._empty_stats()
-        stats["token_count"] = self.budget.tokens_used(msgs)
-        stats["budget_ratio"] = self.budget.usage_ratio(msgs)
+        stats.update(self.budget.snapshot(msgs, tools=tools))
+        stats["token_count"] = stats["total_used"]
+        stats["budget_ratio"] = stats["usage_ratio"]
 
-        if self.budget.is_over_budget(msgs):
+        if self.budget.is_over_budget(msgs, tools=tools):
             msgs, compaction_stats = await auto_compact_if_needed(
                 msgs,
                 budget=self.budget,
+                tools=tools,
                 attachments=attachments,
                 llm_stream=self.llm_stream,
                 keep_last_n_turns=self.keep_last_n_turns,
+                progress_callback=self.compact_progress,
             )
             stats.update(compaction_stats)
 
-        stats["token_count"] = self.budget.tokens_used(msgs)
-        stats["budget_ratio"] = self.budget.usage_ratio(msgs)
+        stats.update(self.budget.snapshot(msgs, tools=tools))
+        stats["token_count"] = stats["total_used"]
+        stats["budget_ratio"] = stats["usage_ratio"]
         return ContextPacket(messages=msgs, tools=tools, stats=stats)
 
     async def compact_if_needed(
@@ -114,8 +120,9 @@ class ContextCompiler:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Run compaction on raw message list (for PTL reactive compaction)."""
         stats = self._empty_stats()
-        stats["token_count"] = self.budget.tokens_used(messages)
-        stats["budget_ratio"] = self.budget.usage_ratio(messages)
+        stats.update(self.budget.snapshot(messages))
+        stats["token_count"] = stats["total_used"]
+        stats["budget_ratio"] = stats["usage_ratio"]
 
         if not (force or self.budget.is_over_budget(messages)):
             return messages, stats
@@ -126,10 +133,12 @@ class ContextCompiler:
             attachments=attachments,
             llm_stream=self.llm_stream,
             keep_last_n_turns=self.keep_last_n_turns,
+            progress_callback=self.compact_progress,
         )
         stats.update(compaction_stats)
-        stats["token_count"] = self.budget.tokens_used(msgs)
-        stats["budget_ratio"] = self.budget.usage_ratio(msgs)
+        stats.update(self.budget.snapshot(msgs))
+        stats["token_count"] = stats["total_used"]
+        stats["budget_ratio"] = stats["usage_ratio"]
         return msgs, stats
 
     # ------------------------------------------------------------------
@@ -141,6 +150,14 @@ class ContextCompiler:
         return {
             "token_count": 0,
             "budget_ratio": 0.0,
+            "message_tokens": 0,
+            "tool_tokens": 0,
+            "response_reserve_tokens": 0,
+            "total_used": 0,
+            "available": 0,
+            "context_window": 0,
+            "soft_limit": 0,
+            "tokenizer": "",
             "compacted": False,
             "tier1_microcompact": False,
             "tier2_context_collapse": False,

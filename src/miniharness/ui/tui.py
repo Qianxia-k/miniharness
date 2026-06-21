@@ -133,7 +133,7 @@ class MiniHarnessTUI(App[None]):
         height: 3;
         border: solid green;
     }
-    #status-panel, #session-panel, #memory-panel, #tool-panel {
+    #status-panel, #token-panel, #session-panel, #memory-panel, #tool-panel {
         border: round grey;
         padding: 0 1;
         margin-bottom: 1;
@@ -166,6 +166,7 @@ class MiniHarnessTUI(App[None]):
         self._session_id = ""
         self._last_tool = "No tool calls yet."
         self._last_memory = "No memory updates yet."
+        self._token_usage = "Token usage pending."
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -176,6 +177,7 @@ class MiniHarnessTUI(App[None]):
                 yield Input(placeholder="Ask MiniHarness or enter a /command", id="composer")
             with Vertical(id="side-column"):
                 yield Static("Starting...", id="status-panel")
+                yield Static("Token usage pending.", id="token-panel")
                 yield Static("Session pending.", id="session-panel")
                 yield Static("No memory updates yet.", id="memory-panel")
                 yield Static("No tool calls yet.", id="tool-panel")
@@ -311,6 +313,15 @@ class MiniHarnessTUI(App[None]):
                 self._refresh_sidebars(extra_status=message)
             return
 
+        if event_type == "token_usage":
+            self._token_usage = _format_token_usage(event)
+            self._refresh_sidebars()
+            return
+
+        if event_type == "compact_progress":
+            self._handle_compact_progress(event)
+            return
+
         if event_type == "permission_request":
             self._handle_permission_request(event)
             return
@@ -343,6 +354,15 @@ class MiniHarnessTUI(App[None]):
             self._append(f"[dim]permission> {tool_name}: {label}[/dim]")
 
         self.push_screen(PermissionModal(tool_name, prompt), _done)
+
+    def _handle_compact_progress(self, event: dict[str, Any]) -> None:
+        message = _format_compact_progress(event)
+        if not message:
+            return
+        self._set_current(f"[yellow]{message}[/yellow]")
+        phase = event.get("phase", "")
+        if phase in {"start", "tier_end", "end"}:
+            self._append(f"[yellow]compact> {message}[/yellow]")
 
     def _finish_line(self) -> None:
         self._busy = False
@@ -385,6 +405,9 @@ class MiniHarnessTUI(App[None]):
         self.query_one("#session-panel", Static).update(
             "\n".join(["[b]Session[/b]", self._session_id or "(pending)"])
         )
+        self.query_one("#token-panel", Static).update(
+            "\n".join(["[b]Context[/b]", self._token_usage])
+        )
         self.query_one("#memory-panel", Static).update(
             "\n".join(["[b]Memory[/b]", self._last_memory])
         )
@@ -400,6 +423,81 @@ class MiniHarnessTUI(App[None]):
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
+
+
+def _format_token_usage(event: dict[str, Any]) -> str:
+    token_count = int(event.get("token_count") or 0)
+    soft_limit = int(event.get("soft_limit") or 0)
+    context_window = int(event.get("context_window") or 0)
+    available = int(event.get("available") or 0)
+    ratio = float(event.get("usage_ratio") or 0.0)
+    tokenizer = event.get("tokenizer") or "unknown"
+    pieces = [
+        f"{_fmt_int(token_count)} / {_fmt_int(soft_limit)} soft ({ratio:.1%})",
+        f"window: {_fmt_int(context_window)}",
+        f"available: {_fmt_int(available)}",
+        f"messages: {_fmt_int(int(event.get('message_tokens') or 0))}",
+        f"tools: {_fmt_int(int(event.get('tool_tokens') or 0))}",
+        f"reserve: {_fmt_int(int(event.get('response_reserve_tokens') or 0))}",
+        f"tokenizer: {tokenizer}",
+    ]
+    return "\n".join(pieces)
+
+
+def _format_compact_progress(event: dict[str, Any]) -> str:
+    phase = str(event.get("phase") or "")
+    tier = str(event.get("tier") or "")
+    token_count = int(event.get("token_count") or 0)
+    soft_limit = int(event.get("soft_limit") or 0)
+    ratio = float(event.get("usage_ratio") or 0.0)
+    if phase == "start":
+        return (
+            f"Compacting context: {_fmt_int(token_count)} / "
+            f"{_fmt_int(soft_limit)} soft ({ratio:.1%})"
+        )
+    if phase == "tier_start":
+        return f"Compacting context: {_pretty_tier(tier)}..."
+    if phase == "tier_end":
+        detail = event.get("detail") or {}
+        saved = _saved_tokens_for_tier(tier, detail)
+        suffix = f", saved ~{_fmt_int(saved)} tokens" if saved > 0 else ""
+        return f"Compaction tier complete: {_pretty_tier(tier)}{suffix}"
+    if phase == "end":
+        compacted = bool(event.get("compacted", False))
+        after = int(event.get("tokens_after") or 0)
+        if compacted:
+            return f"Compaction complete: context is now ~{_fmt_int(after)} tokens"
+        return "Compaction checked: no compactable content found"
+    return ""
+
+
+def _pretty_tier(tier: str) -> str:
+    labels = {
+        "microcompact": "microcompact",
+        "context_collapse": "context collapse",
+        "session_memory": "session memory",
+        "full_llm_compact": "LLM summary",
+    }
+    return labels.get(tier, tier or "unknown")
+
+
+def _saved_tokens_for_tier(tier: str, detail: dict[str, Any]) -> int:
+    keys = {
+        "microcompact": "microcompact_tokens_saved",
+        "context_collapse": "context_collapse_tokens_saved",
+        "session_memory": "session_memory_tokens_saved",
+    }
+    key = keys.get(tier)
+    if not key:
+        return 0
+    try:
+        return int(detail.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}"
 
 
 def run_tui(

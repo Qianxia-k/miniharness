@@ -91,6 +91,36 @@ class StatusEvent:
 
 
 @dataclass
+class TokenUsageEvent:
+    """Current context/token budget snapshot."""
+    type: Literal["token_usage"] = "token_usage"
+    token_count: int = 0
+    context_window: int = 0
+    soft_limit: int = 0
+    usage_ratio: float = 0.0
+    message_tokens: int = 0
+    tool_tokens: int = 0
+    response_reserve_tokens: int = 0
+    available: int = 0
+    tokenizer: str = ""
+    model: str = ""
+
+
+@dataclass
+class CompactProgressEvent:
+    """Conversation compaction progress."""
+    type: Literal["compact_progress"] = "compact_progress"
+    phase: str = ""
+    tier: str = ""
+    token_count: int = 0
+    soft_limit: int = 0
+    usage_ratio: float = 0.0
+    compacted: bool = False
+    tokens_after: int = 0
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class SystemMessage:
     """Transcript-visible system message."""
     type: Literal["system_message"] = "system_message"
@@ -106,7 +136,7 @@ class LineComplete:
 BackendEvent = (
     AssistantDelta | AssistantComplete | ToolStarted | ToolCompleted
     | PermissionRequest | ErrorEvent | ReadyEvent | ShutdownEvent | SystemMessage
-    | LineComplete | StatusEvent
+    | LineComplete | StatusEvent | TokenUsageEvent | CompactProgressEvent
 )
 
 

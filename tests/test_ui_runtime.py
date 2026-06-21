@@ -8,7 +8,7 @@ from miniharness.llm import StreamComplete, TextDelta
 from miniharness.messages import Message
 from miniharness.sessions.storage import load_latest_session, save_session_snapshot
 from miniharness.ui.backend_host import BackendHost
-from miniharness.ui.protocol import AssistantComplete, LineComplete, SystemMessage
+from miniharness.ui.protocol import AssistantComplete, LineComplete, SystemMessage, TokenUsageEvent
 from miniharness.ui.runtime import RuntimeController
 from miniharness.ui.tui import MiniHarnessTUI, PermissionModal
 
@@ -38,6 +38,34 @@ async def test_runtime_slash_command_does_not_call_agent(tmp_path: Path):
     assert should_continue is True
     assert agent_calls == []
     assert any("Conversation has" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_tokens_command_reports_budget_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/tokens",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("Context Token Budget" in msg for msg in system_messages)
+    assert any("tokenizer:" in msg for msg in system_messages)
 
 
 @pytest.mark.asyncio
@@ -228,6 +256,10 @@ async def test_backend_run_agent_stream_wrapper_remains_async_iterator(tmp_path:
                 response = event.message
         assert response is not None
         runtime.loop.conversation.append(response)
+        runtime.loop.last_context_stats = runtime.loop.budget.snapshot(
+            runtime.loop.conversation.to_openai(),
+            tools=[],
+        )
         return response.content or ""
 
     runtime.loop._stream_fn = fake_stream  # type: ignore[attr-defined]
@@ -241,6 +273,7 @@ async def test_backend_run_agent_stream_wrapper_remains_async_iterator(tmp_path:
     assert result == "ok"
     assert any(getattr(evt, "type", "") == "assistant_delta" and evt.text == "ok" for evt in emitted)
     assert any(isinstance(evt, AssistantComplete) and evt.text == "ok" for evt in emitted)
+    assert any(isinstance(evt, TokenUsageEvent) and evt.token_count > 0 for evt in emitted)
 
 
 @pytest.mark.asyncio

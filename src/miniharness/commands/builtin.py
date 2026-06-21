@@ -48,6 +48,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /exit, /quit, /q    Exit MiniHarness")
     lines.append("  /clear              Clear conversation history")
     lines.append("  /history            Show message count")
+    lines.append("  /tokens             Show current context token budget")
     lines.append("  /model [name]       Show or switch the model")
     lines.append("  /turns [n]          Show or set max turns")
     lines.append("  /permissions [mode] Show / cycle / set permission mode")
@@ -86,6 +87,37 @@ def cmd_history(args: str, ctx: CommandContext) -> CommandResult:
     """Show message count."""
     count = len(ctx.loop.conversation.messages)
     return CommandResult.ok(f"Conversation has {count} messages (including system prompt).")
+
+
+def cmd_tokens(args: str, ctx: CommandContext) -> CommandResult:
+    """Show current context token budget."""
+    tools = []
+    if ctx.tool_registry is not None:
+        try:
+            tools = ctx.tool_registry.to_openai_tools()
+        except Exception:
+            tools = []
+    snapshot = ctx.loop.budget.snapshot(ctx.loop.conversation.to_openai(), tools=tools)
+    lines = [
+        "**Context Token Budget**",
+        f"  model: {snapshot['model']}",
+        f"  tokenizer: {snapshot['tokenizer']}",
+        f"  used: {_fmt_int(snapshot['token_count'])} / {_fmt_int(snapshot['soft_limit'])} soft "
+        f"({snapshot['usage_ratio']:.1%})",
+        f"  context window: {_fmt_int(snapshot['context_window'])}",
+        f"  available before soft limit: {_fmt_int(snapshot['available'])}",
+        f"  messages: {_fmt_int(snapshot['message_tokens'])}",
+        f"  tools: {_fmt_int(snapshot['tool_tokens'])}",
+        f"  response reserve: {_fmt_int(snapshot['response_reserve_tokens'])}",
+    ]
+    return CommandResult.ok("\n".join(lines))
+
+
+def _fmt_int(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
 
 
 # ---------------------------------------------------------------------------

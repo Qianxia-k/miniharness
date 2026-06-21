@@ -178,10 +178,12 @@ class AgentLoop:
         cwd: Path,
         settings: Settings,
         permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+        compact_progress: Callable[[dict], Awaitable[None]] | None = None,
     ) -> None:
         self.cwd = cwd
         self.settings = settings
         self._permission_prompt = permission_prompt
+        self._compact_progress = compact_progress
 
         # ── Provider & model ──────────────────────────────────────────
         provider_profile = get_profile(settings.provider.name)
@@ -261,6 +263,7 @@ class AgentLoop:
             budget=self.budget,
             llm_stream=self._stream_fn,
             keep_last_n_turns=settings.keep_last_n_turns,
+            compact_progress=self._compact_progress,
         )
 
         # ── Hooks: settings + plugins → registry → executor ──────────
@@ -277,6 +280,7 @@ class AgentLoop:
 
         # ── Structured session state ──────────────────────────────────
         self.tool_metadata = init_tool_metadata()
+        self.last_context_stats: dict[str, object] = {}
 
         # ── Session identity ──────────────────────────────────────────
         self.session_id: str | None = None
@@ -360,6 +364,7 @@ class AgentLoop:
         packet = await self.compiler.compile(
             self.conversation, tools_openai, attachments=attachments,
         )
+        self.last_context_stats = dict(packet.stats)
         if packet.stats.get("compacted"):
             self._replace_conversation(packet.messages)
             show_compaction_summary(packet.stats)

@@ -30,6 +30,7 @@ from miniharness.commands.builtin import (
     cmd_project,
     cmd_skills,
     cmd_temperature,
+    cmd_tokens,
     cmd_tools,
     cmd_top_p,
     cmd_turns,
@@ -51,6 +52,7 @@ SystemPrinter = Callable[[str], Awaitable[None]]
 AgentRunner = Callable[[AgentLoop, str], Awaitable[str]]
 ClearHandler = Callable[[], Awaitable[None]]
 PermissionPrompt = Callable[[str, str], Awaitable[bool]]
+CompactProgressHandler = Callable[[dict], Awaitable[None]]
 
 
 @dataclass
@@ -60,6 +62,7 @@ class RuntimeController:
     cwd: Path
     settings: Settings
     permission_prompt: PermissionPrompt | None = None
+    compact_progress: CompactProgressHandler | None = None
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
@@ -71,6 +74,7 @@ class RuntimeController:
             cwd=self.cwd,
             settings=self.settings,
             permission_prompt=self.permission_prompt,
+            compact_progress=self.compact_progress,
         )
         self.loop.session_id = uuid.uuid4().hex[:12]
         self.commands = self._build_command_registry()
@@ -249,6 +253,7 @@ class RuntimeController:
         reg.register("clear", cmd_clear, description="Clear conversation history", source="builtin")
         reg.register("help", cmd_help, description="Show available commands", source="builtin")
         reg.register("history", cmd_history, description="Show message count", source="builtin")
+        reg.register("tokens", cmd_tokens, description="Show current context token budget", source="builtin")
         reg.register("model", cmd_model, description="Show or switch the model", source="builtin")
         reg.register("turns", cmd_turns, description="Show or set max turns", source="builtin")
         reg.register("permissions", cmd_permissions, description="Show or set permission mode", source="builtin")
@@ -302,6 +307,7 @@ class RuntimeController:
             self.loop,
             target_id,
             permission_prompt=self.permission_prompt,
+            compact_progress=self.compact_progress,
         )
         if new_loop is None:
             return CommandResult.ok(f"Session '{target}' not found.")

@@ -38,7 +38,9 @@ Usage::
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+from miniharness.services.token_estimation import estimate_tokens
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -122,7 +124,8 @@ def microcompact_messages(
 
     # Estimate tokens saved (for stats).
     tokens_before = sum(
-        len(messages[i].get("content", "") or "") // 4 for i in to_clear
+        estimate_tokens(messages[i].get("content", "") or "")
+        for i in to_clear
     )
 
     # Mutate in place.
@@ -134,7 +137,7 @@ def microcompact_messages(
                 "content": "[Old tool result content cleared]",
             }
 
-    tokens_after = len("[Old tool result content cleared]") // 4 * len(to_clear)
+    tokens_after = estimate_tokens("[Old tool result content cleared]") * len(to_clear)
 
     return messages, {
         "microcompact_cleared": len(to_clear),
@@ -183,7 +186,7 @@ def context_collapse_messages(
 
         messages[i] = {**msg, "content": truncated}
         collapsed += 1
-        tokens_saved += collapsed_chars // 4
+        tokens_saved += estimate_tokens("x" * collapsed_chars)
 
     return messages, {
         "context_collapse_blocks": collapsed,
@@ -492,9 +495,11 @@ async def auto_compact_if_needed(
     messages: list[dict[str, Any]],
     *,
     budget,  # ContextBudget
+    tools: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
     llm_stream=None,
     keep_last_n_turns: int = 3,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run progressive compaction, stopping when the budget is satisfied.
 
@@ -510,38 +515,66 @@ async def auto_compact_if_needed(
     Returns ``(compacted_messages, stats)``.
     """
 
+    tools = tools or []
+
+    async def emit(phase: str, **payload: Any) -> None:
+        if progress_callback is None:
+            return
+        await progress_callback({
+            "phase": phase,
+            "token_count": budget.tokens_used(messages, tools=tools),
+            "soft_limit": budget.max_tokens,
+            "usage_ratio": budget.usage_ratio(messages, tools=tools),
+            **payload,
+        })
+
     stats: dict[str, Any] = {
         "original_count": len(messages),
-        "tokens_before": budget.tokens_used(messages),
+        "tokens_before": budget.tokens_used(messages, tools=tools),
+        "compacted": False,
         "tier1_microcompact": False,
         "tier2_context_collapse": False,
         "tier3_session_memory": False,
         "tier4_full_llm_compact": False,
         "final_count": len(messages),
-        "tokens_after": budget.tokens_used(messages),
+        "tokens_after": budget.tokens_used(messages, tools=tools),
     }
 
+    await emit("start")
+
     # ---- Tier 1: Microcompact ---------------------------------------------
-    if budget.is_over_budget(messages):
+    if budget.is_over_budget(messages, tools=tools):
+        await emit("tier_start", tier="microcompact")
         messages, t1_stats = microcompact_messages(messages)
-        stats["tier1_microcompact"] = True
+        if t1_stats.get("microcompact_cleared", 0) > 0:
+            stats["tier1_microcompact"] = True
+            stats["compacted"] = True
         stats.update(t1_stats)
+        await emit("tier_end", tier="microcompact", **t1_stats)
 
     # ---- Tier 2: Context Collapse -----------------------------------------
-    if budget.is_over_budget(messages):
+    if budget.is_over_budget(messages, tools=tools):
+        await emit("tier_start", tier="context_collapse")
         messages, t2_stats = context_collapse_messages(messages)
-        stats["tier2_context_collapse"] = True
+        if t2_stats.get("context_collapse_blocks", 0) > 0:
+            stats["tier2_context_collapse"] = True
+            stats["compacted"] = True
         stats.update(t2_stats)
+        await emit("tier_end", tier="context_collapse", **t2_stats)
 
     # ---- Tier 3: Session Memory -------------------------------------------
-    if budget.is_over_budget(messages):
+    if budget.is_over_budget(messages, tools=tools):
+        await emit("tier_start", tier="session_memory")
         messages, t3_stats = session_memory_compact_messages(messages)
         if t3_stats.get("session_memory_summarised"):
             stats["tier3_session_memory"] = True
+            stats["compacted"] = True
         stats.update(t3_stats)
+        await emit("tier_end", tier="session_memory", **t3_stats)
 
     # ---- Tier 4: Full LLM Compact -----------------------------------------
-    if budget.is_over_budget(messages):
+    if budget.is_over_budget(messages, tools=tools):
+        await emit("tier_start", tier="full_llm_compact")
         messages, t4_stats = await full_llm_compact(
             messages,
             attachments=attachments,
@@ -550,10 +583,13 @@ async def auto_compact_if_needed(
         )
         if t4_stats.get("full_compact_ran"):
             stats["tier4_full_llm_compact"] = True
+            stats["compacted"] = True
         stats.update(t4_stats)
+        await emit("tier_end", tier="full_llm_compact", **t4_stats)
 
     stats["final_count"] = len(messages)
-    stats["tokens_after"] = budget.tokens_used(messages)
+    stats["tokens_after"] = budget.tokens_used(messages, tools=tools)
+    await emit("end", compacted=stats["compacted"], tokens_after=stats["tokens_after"])
 
     return messages, stats
 
@@ -567,7 +603,5 @@ async def auto_compact_if_needed(
 # ---------------------------------------------------------------------------
 
 def _rough_token_count(text: str) -> int:
-    """Rough token estimate (~4 chars / token)."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
+    """Backward-compatible wrapper around the shared estimator."""
+    return estimate_tokens(text)

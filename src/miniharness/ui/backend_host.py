@@ -24,6 +24,7 @@ from miniharness.llm import StreamComplete, TextDelta
 from miniharness.ui.protocol import (
     AssistantComplete,
     AssistantDelta,
+    CompactProgressEvent,
     ErrorEvent,
     LineComplete,
     PermissionRequest,
@@ -31,6 +32,7 @@ from miniharness.ui.protocol import (
     ShutdownEvent,
     StatusEvent,
     SystemMessage,
+    TokenUsageEvent,
     ToolCompleted,
     ToolStarted,
     decode_message,
@@ -57,6 +59,7 @@ class BackendHost:
             cwd=self.cwd,
             settings=self.settings,
             permission_prompt=self._ask_permission,
+            compact_progress=self._emit_compact_progress,
         )
         await self._runtime.start()
 
@@ -245,6 +248,8 @@ class BackendHost:
             loop._stream_fn = original_stream
             loop._execute_tools = original_exec
 
+        self._emit_token_usage(loop)
+
         if _is_error_result(result):
             self._emit(ErrorEvent(message=result))
             return result
@@ -257,6 +262,47 @@ class BackendHost:
 
     async def _clear_output(self) -> None:
         self._emit(SystemMessage(message="Conversation cleared."))
+
+    async def _emit_compact_progress(self, event: dict[str, Any]) -> None:
+        detail = {
+            key: value for key, value in event.items()
+            if key not in {
+                "phase",
+                "tier",
+                "token_count",
+                "soft_limit",
+                "usage_ratio",
+                "compacted",
+                "tokens_after",
+            }
+        }
+        self._emit(CompactProgressEvent(
+            phase=str(event.get("phase") or ""),
+            tier=str(event.get("tier") or ""),
+            token_count=int(event.get("token_count") or 0),
+            soft_limit=int(event.get("soft_limit") or 0),
+            usage_ratio=float(event.get("usage_ratio") or 0.0),
+            compacted=bool(event.get("compacted", False)),
+            tokens_after=int(event.get("tokens_after") or 0),
+            detail=detail,
+        ))
+
+    def _emit_token_usage(self, loop: AgentLoop) -> None:
+        stats = getattr(loop, "last_context_stats", {}) or {}
+        if not stats:
+            return
+        self._emit(TokenUsageEvent(
+            token_count=int(stats.get("token_count") or stats.get("total_used") or 0),
+            context_window=int(stats.get("context_window") or loop.budget.total),
+            soft_limit=int(stats.get("soft_limit") or loop.budget.max_tokens),
+            usage_ratio=float(stats.get("usage_ratio") or stats.get("budget_ratio") or 0.0),
+            message_tokens=int(stats.get("message_tokens") or 0),
+            tool_tokens=int(stats.get("tool_tokens") or 0),
+            response_reserve_tokens=int(stats.get("response_reserve_tokens") or 0),
+            available=int(stats.get("available") or 0),
+            tokenizer=str(stats.get("tokenizer") or ""),
+            model=str(stats.get("model") or loop.model),
+        ))
 
     def _handle_permission_response(self, request_id: str, allowed: bool) -> None:
         fut = self._pending_perm.pop(request_id, None)
