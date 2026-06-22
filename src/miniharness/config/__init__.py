@@ -62,6 +62,7 @@ def apply_cli_overrides(
     model: str | None = None,
     base_url: str | None = None,
     max_turns: int | None = None,
+    context_budget_ratio: float | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
     max_tokens: int | None = None,
@@ -81,6 +82,8 @@ def apply_cli_overrides(
         settings.provider = replace(settings.provider, base_url=base_url)
     if max_turns is not None:
         settings = replace(settings, max_turns=max_turns)
+    if context_budget_ratio is not None:
+        settings = replace(settings, context_budget_ratio=_clamp_context_budget_ratio(context_budget_ratio))
     # LLM sampling params — write through the shared AgentSettings reference.
     if temperature is not None:
         settings.agent.temperature = temperature
@@ -116,6 +119,16 @@ def _apply_env_vars(settings: Settings) -> Settings:
     if max_turns_str.isdigit():
         settings = replace(settings, max_turns=int(max_turns_str))
 
+    ratio_str = os.environ.get("MINIHARNESS_CONTEXT_BUDGET_RATIO", "")
+    if ratio_str:
+        try:
+            settings = replace(
+                settings,
+                context_budget_ratio=_clamp_context_budget_ratio(float(ratio_str)),
+            )
+        except ValueError:
+            pass
+
     # Agent — LLM sampling params
     temp_str = os.environ.get("MINIHARNESS_TEMPERATURE", "")
     if temp_str:
@@ -147,6 +160,17 @@ def _apply_env_vars(settings: Settings) -> Settings:
         settings = replace(settings, allow_project_plugins=False)
 
     return settings
+
+
+def _clamp_context_budget_ratio(value: float) -> float:
+    """Validate the soft context-budget ratio.
+
+    Keep this intentionally broad so developers can force compact testing with
+    tiny ratios, while still rejecting values that make no semantic sense.
+    """
+    if value <= 0 or value > 1:
+        raise ValueError("context budget ratio must be > 0 and <= 1")
+    return value
 
 
 def _auto_detect_provider(settings: Settings) -> Settings:

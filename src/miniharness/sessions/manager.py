@@ -49,6 +49,7 @@ def switch_session(
     *,
     permission_prompt=None,
     compact_progress=None,
+    event_bus=None,
 ) -> AgentLoop | None:
     """Save *current_loop* and switch to *target_session_id*.
 
@@ -75,6 +76,7 @@ def switch_session(
         settings=current_loop.settings,
         permission_prompt=permission_prompt,
         compact_progress=compact_progress,
+        event_bus=event_bus,
     )
     next_loop.restore_messages(data.get("messages", []))
     next_loop.session_id = data.get("session_id", target_session_id)

@@ -11,7 +11,6 @@ all line handling to the shared runtime controller used by interactive modes.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import threading
 import uuid
@@ -20,7 +19,23 @@ from pathlib import Path
 
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
-from miniharness.llm import StreamComplete, TextDelta
+from miniharness.runtime import (
+    AssistantCompleteEvent,
+    AssistantDeltaEvent,
+    CompactProgressRuntimeEvent,
+    ErrorRuntimeEvent,
+    LineCompleteEvent,
+    PermissionRequestEvent,
+    ReadyRuntimeEvent,
+    RuntimeEvent,
+    RuntimeEventBus,
+    ShutdownRuntimeEvent,
+    StatusRuntimeEvent,
+    SystemRuntimeEvent,
+    TokenUsageRuntimeEvent,
+    ToolCompletedEvent,
+    ToolStartedEvent,
+)
 from miniharness.ui.protocol import (
     AssistantComplete,
     AssistantDelta,
@@ -51,6 +66,8 @@ class BackendHost:
         self._pending_perm: dict[str, asyncio.Future[bool]] = {}
         self._request_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._active_request_task: asyncio.Task[bool] | None = None
+        self.event_bus = RuntimeEventBus()
+        self.event_bus.subscribe(self._emit_protocol_event)
         self._busy = False
         self._running = True
 
@@ -60,10 +77,11 @@ class BackendHost:
             settings=self.settings,
             permission_prompt=self._ask_permission,
             compact_progress=self._emit_compact_progress,
+            event_bus=self.event_bus,
         )
         await self._runtime.start()
 
-        self._emit(ReadyEvent(
+        await self._publish(ReadyRuntimeEvent(
             model=self._runtime.loop.model,
             cwd=str(self.cwd),
             session_id=self._runtime.loop.session_id or "",
@@ -76,17 +94,17 @@ class BackendHost:
                 request_type = msg.get("type", "")
 
                 if request_type == "shutdown":
-                    self._emit(ShutdownEvent())
+                    await self._publish(ShutdownRuntimeEvent())
                     break
                 if request_type == "interrupt":
                     await self._interrupt_active_request()
                     continue
                 if request_type != "submit_line":
-                    self._emit(ErrorEvent(message=f"Unknown request type: {request_type}"))
+                    await self._publish(ErrorRuntimeEvent(message=f"Unknown request type: {request_type}"))
                     continue
 
                 if self._busy:
-                    self._emit(ErrorEvent(message="Session is busy"))
+                    await self._publish(ErrorRuntimeEvent(message="Session is busy"))
                     continue
 
                 line = msg.get("line", "")
@@ -100,7 +118,7 @@ class BackendHost:
                     self._busy = False
 
                 if not should_continue:
-                    self._emit(ShutdownEvent())
+                    await self._publish(ShutdownRuntimeEvent())
                     break
         finally:
             self._running = False
@@ -152,8 +170,8 @@ class BackendHost:
         try:
             return await task
         except asyncio.CancelledError:
-            self._emit(SystemMessage(message="Interrupted by user."))
-            self._emit(LineComplete())
+            await self._publish(SystemRuntimeEvent(message="Interrupted by user."))
+            await self._publish(LineCompleteEvent())
             return True
         finally:
             if self._active_request_task is task:
@@ -178,7 +196,7 @@ class BackendHost:
                 print_system=self._print_system,
                 clear_output=self._clear_output,
             )
-            self._emit(StatusEvent(
+            await self._publish(StatusRuntimeEvent(
                 message=(
                     f"Model: {runtime.loop.model}  |  "
                     f"Session: {(runtime.loop.session_id or '')[:12]}"
@@ -186,82 +204,35 @@ class BackendHost:
             ))
             return should_continue
         except Exception as exc:
-            self._emit(ErrorEvent(message=str(exc)))
+            await self._publish(ErrorRuntimeEvent(message=str(exc)))
             return True
         finally:
-            self._emit(LineComplete())
+            await self._publish(LineCompleteEvent())
 
     async def _run_agent(self, loop: AgentLoop, prompt: str) -> str:
         """Run one agent turn and translate loop side effects into UI events."""
         try:
             return await self._run_agent_impl(loop, prompt)
         except asyncio.CancelledError:
-            self._emit(SystemMessage(message="Cancelled."))
+            await self._publish(SystemRuntimeEvent(message="Cancelled."))
             return "Cancelled."
 
     async def _run_agent_impl(self, loop: AgentLoop, prompt: str) -> str:
+        result = await loop.run(prompt)
 
-        # ── Hook: LLM stream → assistant_delta events ──────────────
-        original_stream = loop.stream_fn
-
-        async def _stream_wrapper(*a, **kw):
-            async for evt in original_stream(*a, **kw):
-                if isinstance(evt, TextDelta):
-                    self._emit(AssistantDelta(text=evt.text))
-                    continue  # suppress — don't let _call_llm console.print() raw text
-                yield evt
-
-        loop._stream_fn = _stream_wrapper
-
-        # ── Hook: tool execution → tool_started/tool_completed ────
-        original_exec = loop._execute_tools
-
-        async def _exec_wrapper(tool_calls):
-            for tc in tool_calls:
-                name = tc["function"]["name"]
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                self._emit(ToolStarted(tool_name=name, tool_input=args))
-
-            await original_exec(tool_calls)
-
-            msgs = loop.conversation.messages
-            for tc in tool_calls:
-                tc_id = tc["id"]
-                name = tc["function"]["name"]
-                for m in reversed(msgs):
-                    if m.tool_call_id == tc_id:
-                        self._emit(ToolCompleted(
-                            tool_name=name,
-                            output=m.content or "",
-                            is_error="Error" in (m.content or ""),
-                        ))
-                        break
-
-        loop._execute_tools = _exec_wrapper
-
-        try:
-            result = await loop.run(prompt)
-        finally:
-            loop._stream_fn = original_stream
-            loop._execute_tools = original_exec
-
-        self._emit_token_usage(loop)
+        await self._emit_token_usage(loop)
 
         if _is_error_result(result):
-            self._emit(ErrorEvent(message=result))
+            await self._publish(ErrorRuntimeEvent(message=result))
             return result
 
-        self._emit(AssistantComplete(text=result))
         return result
 
     async def _print_system(self, message: str) -> None:
-        self._emit(SystemMessage(message=message))
+        await self._publish(SystemRuntimeEvent(message=message))
 
     async def _clear_output(self) -> None:
-        self._emit(SystemMessage(message="Conversation cleared."))
+        await self._publish(SystemRuntimeEvent(message="Conversation cleared."))
 
     async def _emit_compact_progress(self, event: dict[str, Any]) -> None:
         detail = {
@@ -276,7 +247,7 @@ class BackendHost:
                 "tokens_after",
             }
         }
-        self._emit(CompactProgressEvent(
+        await self._publish(CompactProgressRuntimeEvent(
             phase=str(event.get("phase") or ""),
             tier=str(event.get("tier") or ""),
             token_count=int(event.get("token_count") or 0),
@@ -287,11 +258,11 @@ class BackendHost:
             detail=detail,
         ))
 
-    def _emit_token_usage(self, loop: AgentLoop) -> None:
+    async def _emit_token_usage(self, loop: AgentLoop) -> None:
         stats = getattr(loop, "last_context_stats", {}) or {}
         if not stats:
             return
-        self._emit(TokenUsageEvent(
+        await self._publish(TokenUsageRuntimeEvent(
             token_count=int(stats.get("token_count") or stats.get("total_used") or 0),
             context_window=int(stats.get("context_window") or loop.budget.total),
             soft_limit=int(stats.get("soft_limit") or loop.budget.max_tokens),
@@ -314,7 +285,11 @@ class BackendHost:
         req_id = uuid.uuid4().hex[:8]
         fut: asyncio.Future[bool] = asyncio.Future()
         self._pending_perm[req_id] = fut
-        self._emit(PermissionRequest(request_id=req_id, tool_name=tool_name, prompt=prompt))
+        await self._publish(PermissionRequestEvent(
+            request_id=req_id,
+            tool_name=tool_name,
+            prompt=prompt,
+        ))
         try:
             return await asyncio.wait_for(fut, timeout=300)
         except asyncio.TimeoutError:
@@ -324,6 +299,14 @@ class BackendHost:
         if self._runtime is not None:
             await self._runtime.close()
             self._runtime = None
+
+    async def _publish(self, event: RuntimeEvent) -> None:
+        await self.event_bus.emit(event)
+
+    def _emit_protocol_event(self, event: RuntimeEvent) -> None:
+        protocol_event = _runtime_to_protocol_event(event)
+        if protocol_event is not None:
+            self._emit(protocol_event)
 
     def _emit(self, event) -> None:
         sys.stdout.write(encode_event(event) + "\n")
@@ -339,3 +322,61 @@ def _is_error_result(result: str) -> bool:
         "No response from model.",
         "Reached maximum turns",
     ))
+
+
+def _runtime_to_protocol_event(event: RuntimeEvent):
+    if isinstance(event, ReadyRuntimeEvent):
+        return ReadyEvent(model=event.model, cwd=event.cwd, session_id=event.session_id)
+    if isinstance(event, AssistantDeltaEvent):
+        return AssistantDelta(text=event.text)
+    if isinstance(event, AssistantCompleteEvent):
+        return AssistantComplete(text=event.text)
+    if isinstance(event, ToolStartedEvent):
+        return ToolStarted(tool_name=event.tool_name, tool_input=event.tool_input)
+    if isinstance(event, ToolCompletedEvent):
+        return ToolCompleted(
+            tool_name=event.tool_name,
+            output=event.output,
+            is_error=event.is_error,
+        )
+    if isinstance(event, PermissionRequestEvent):
+        return PermissionRequest(
+            request_id=event.request_id,
+            tool_name=event.tool_name,
+            prompt=event.prompt,
+        )
+    if isinstance(event, ErrorRuntimeEvent):
+        return ErrorEvent(message=event.message)
+    if isinstance(event, StatusRuntimeEvent):
+        return StatusEvent(message=event.message)
+    if isinstance(event, SystemRuntimeEvent):
+        return SystemMessage(message=event.message)
+    if isinstance(event, TokenUsageRuntimeEvent):
+        return TokenUsageEvent(
+            token_count=event.token_count,
+            context_window=event.context_window,
+            soft_limit=event.soft_limit,
+            usage_ratio=event.usage_ratio,
+            message_tokens=event.message_tokens,
+            tool_tokens=event.tool_tokens,
+            response_reserve_tokens=event.response_reserve_tokens,
+            available=event.available,
+            tokenizer=event.tokenizer,
+            model=event.model,
+        )
+    if isinstance(event, CompactProgressRuntimeEvent):
+        return CompactProgressEvent(
+            phase=event.phase,
+            tier=event.tier,
+            token_count=event.token_count,
+            soft_limit=event.soft_limit,
+            usage_ratio=event.usage_ratio,
+            compacted=event.compacted,
+            tokens_after=event.tokens_after,
+            detail=event.detail,
+        )
+    if isinstance(event, LineCompleteEvent):
+        return LineComplete()
+    if isinstance(event, ShutdownRuntimeEvent):
+        return ShutdownEvent()
+    return None

@@ -13,7 +13,7 @@ It does NOT own:
     - System prompt TEXT assembly → ``prompts/system.py``
     - Token budget / compaction MECHANICS → ``context/compiler.py``
     - Permission logic → ``permissions.py``
-    - Display rendering → ``display.py``
+    - Runtime event rendering → ``runtime/events.py`` + frontend adapters
     - LLM wire protocol → ``llm.py``
     - Hook execution ENGINE → ``hooks/executor.py``
 
@@ -34,9 +34,7 @@ Architecture::
     │                                                     │
     │  Collaborators (called per-turn):                    │
     │    prompts.system.assemble_system_prompt()           │
-    │    display.show_compaction_summary()                  │
-    │    display.show_status()                              │
-    │    display.show_compact_event()                       │
+    │    runtime event emission                             │
     │    context.carryover.*                                │
     │    tools.offload.offload_if_needed()                  │
     └─────────────────────────────────────────────────────┘
@@ -57,11 +55,6 @@ from miniharness.context.carryover import (
     remember_user_goal,
 )
 from miniharness.context.compiler import ContextCompiler
-from miniharness.display import (
-    show_compact_event,
-    show_compaction_summary,
-    show_status,
-)
 from miniharness.hooks import (
     AggregatedHookResult,
     HookEvent,
@@ -102,6 +95,17 @@ from miniharness.plugins.tool import PluginTool
 from miniharness.prompts.project_instructions import load_project_instructions
 from miniharness.prompts.system import assemble_system_prompt
 from miniharness.providers import get_profile
+from miniharness.runtime import (
+    AssistantCompleteEvent,
+    AssistantDeltaEvent,
+    CompactProgressRuntimeEvent,
+    RuntimeEvent,
+    RuntimeEventBus,
+    StatusRuntimeEvent,
+    SystemRuntimeEvent,
+    ToolCompletedEvent,
+    ToolStartedEvent,
+)
 from miniharness.skills import SkillTool, load_skill_registry
 from miniharness.tool_registry import create_default_registry
 from miniharness.tools.offload import offload_if_needed
@@ -179,11 +183,13 @@ class AgentLoop:
         settings: Settings,
         permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
         compact_progress: Callable[[dict], Awaitable[None]] | None = None,
+        event_bus: RuntimeEventBus | None = None,
     ) -> None:
         self.cwd = cwd
         self.settings = settings
         self._permission_prompt = permission_prompt
         self._compact_progress = compact_progress
+        self._event_bus = event_bus
 
         # ── Provider & model ──────────────────────────────────────────
         provider_profile = get_profile(settings.provider.name)
@@ -309,11 +315,11 @@ class AgentLoop:
                 try:
                     await self._mcp_manager.connect_all()
                 except Exception as exc:
-                    from rich.console import Console
-                    Console().print(f"  [yellow]! MCP connection failed: {exc}[/yellow]")
+                    await self._emit_event(SystemRuntimeEvent(
+                        message=f"! MCP connection failed: {exc}"
+                    ))
 
-                # Print diagnostic summary and register discovered tools.
-                _print_mcp_diagnostics(self._mcp_manager)
+                await self._emit_mcp_diagnostics()
 
                 for tool_info in self._mcp_manager.list_tools():
                     from miniharness.mcp.tool_adapter import McpToolAdapter
@@ -367,7 +373,9 @@ class AgentLoop:
         self.last_context_stats = dict(packet.stats)
         if packet.stats.get("compacted"):
             self._replace_conversation(packet.messages)
-            show_compaction_summary(packet.stats)
+            await self._emit_event(SystemRuntimeEvent(
+                message=_format_compaction_summary(packet.stats)
+            ))
 
             # ── Hook: post_compact ────────────────────────────────────
             await self._fire_hook(HookEvent.POST_COMPACT, {
@@ -399,18 +407,25 @@ class AgentLoop:
             except CompletionTokenLimitError as exc:
                 if exc.supported_limit is not None:
                     max_tokens_override = exc.supported_limit
-                    show_status(
-                        f"Model rejected max_tokens; retrying with "
-                        f"limit {max_tokens_override}."
-                    )
+                    await self._emit_event(StatusRuntimeEvent(
+                        message=(
+                            f"Model rejected max_tokens; retrying with "
+                            f"limit {max_tokens_override}."
+                        )
+                    ))
                     continue
                 return f"Error: {exc}"
 
             except PromptTooLongError:
                 if not reactive_compact_attempted:
                     reactive_compact_attempted = True
-                    show_status("Prompt too long — running reactive compaction...")
-                    show_compact_event(CompactPhase.COMPACT_START, trigger="reactive")
+                    await self._emit_event(StatusRuntimeEvent(
+                        message="Prompt too long; running reactive compaction..."
+                    ))
+                    await self._emit_event(CompactProgressRuntimeEvent(
+                        phase=str(CompactPhase.COMPACT_START.value),
+                        detail={"trigger": "reactive"},
+                    ))
 
                     msgs = self.conversation.to_openai()
                     attachments = build_compact_attachments(self.tool_metadata)
@@ -419,11 +434,21 @@ class AgentLoop:
                     )
                     if cstats.get("compacted"):
                         self._replace_conversation(msgs)
-                        show_compaction_summary(cstats)
-                        show_compact_event(CompactPhase.COMPACT_END, trigger="reactive")
+                        await self._emit_event(SystemRuntimeEvent(
+                            message=_format_compaction_summary(cstats)
+                        ))
+                        await self._emit_event(CompactProgressRuntimeEvent(
+                            phase=str(CompactPhase.COMPACT_END.value),
+                            compacted=True,
+                            tokens_after=int(cstats.get("token_count") or 0),
+                            detail={"trigger": "reactive"},
+                        ))
                         continue
 
-                    show_compact_event(CompactPhase.COMPACT_FAILED, trigger="reactive")
+                    await self._emit_event(CompactProgressRuntimeEvent(
+                        phase=str(CompactPhase.COMPACT_FAILED.value),
+                        detail={"trigger": "reactive"},
+                    ))
                 return "Error: prompt too long even after compaction."
 
             except Exception as exc:
@@ -441,6 +466,9 @@ class AgentLoop:
                 await self._execute_tools(response_message.tool_calls)
                 continue
 
+            await self._emit_event(AssistantCompleteEvent(
+                text=response_message.content or ""
+            ))
             return response_message.content or ""
 
         return "Reached maximum turns without a final answer."
@@ -452,9 +480,6 @@ class AgentLoop:
     async def _execute_tools(self, tool_calls: list[dict]) -> None:
         """Execute tool calls: validate → check permissions → run →
         offload → record carryover → append to conversation."""
-        from rich.console import Console
-        _console = Console()
-
         for tool_call in tool_calls:
             tool_name = tool_call["function"]["name"]
             raw_args = tool_call["function"]["arguments"]
@@ -469,11 +494,17 @@ class AgentLoop:
                     content=f"Invalid JSON arguments: {raw_args}",
                     tool_call_id=tool_call_id,
                 ))
+                await self._emit_event(ToolCompletedEvent(
+                    tool_name=tool_name,
+                    output=f"Invalid JSON arguments: {raw_args}",
+                    is_error=True,
+                ))
                 continue
 
-            _console.print(
-                f"  [dim]→ {tool_name}({json.dumps(arguments, ensure_ascii=False)})[/dim]"
-            )
+            await self._emit_event(ToolStartedEvent(
+                tool_name=tool_name,
+                tool_input=arguments,
+            ))
 
             # ── Hook: pre_tool_use (can block tool execution) ────────
             pre_result = await self._fire_hook(HookEvent.PRE_TOOL_USE, {
@@ -482,34 +513,30 @@ class AgentLoop:
                 "session_id": self.session_id or "",
             })
             if pre_result.blocked:
+                output = f"Hook blocked: {pre_result.reason}"
                 self.conversation.append(Message(
                     role="tool",
-                    content=f"Hook blocked: {pre_result.reason}",
+                    content=output,
                     tool_call_id=tool_call_id,
+                ))
+                await self._emit_event(ToolCompletedEvent(
+                    tool_name=tool_name,
+                    output=output,
+                    is_error=True,
                 ))
                 continue
 
             # Execute.
             result = await self.tools.execute(tool_name, arguments)
 
-            # Display.
-            if result.is_error:
-                _console.print(f"  [yellow]! {result.output[:120]}[/yellow]")
-            elif tool_name.startswith("memory_"):
-                _console.print(f"  [bold cyan]memory[/bold cyan] {result.output}")
-            else:
-                preview = result.output[:80].replace("\n", " ")
-                _console.print(
-                    f"  [dim]← {preview}...[/dim]" if len(result.output) > 80
-                    else f"  [dim]← {preview}[/dim]"
-                )
-
             # Offload large output.
             inline_text, artifact_path = offload_if_needed(
                 tool_name=tool_name, output=result.output
             )
             if artifact_path is not None:
-                _console.print(f"  [dim]💾 Output offloaded → {artifact_path}[/dim]")
+                await self._emit_event(SystemRuntimeEvent(
+                    message=f"Output offloaded -> {artifact_path}"
+                ))
 
             # ── Hook: post_tool_use (logging / audit / post-validation) ──
             await self._fire_hook(HookEvent.POST_TOOL_USE, {
@@ -543,6 +570,11 @@ class AgentLoop:
                 role="tool",
                 content=inline_text,
                 tool_call_id=tool_call_id,
+            ))
+            await self._emit_event(ToolCompletedEvent(
+                tool_name=tool_name,
+                output=inline_text,
+                is_error=result.is_error,
             ))
 
     # ------------------------------------------------------------------
@@ -630,13 +662,10 @@ class AgentLoop:
         tools: list[dict],
         max_tokens_override: int | None,
     ) -> Message | None:
-        """Stream an LLM call, yielding text deltas to the console.
+        """Stream an LLM call and emit frontend-neutral text deltas.
 
         Returns the assembled assistant Message, or None if streaming failed.
         """
-        from rich.console import Console
-        _console = Console()
-
         response_message = None
         # Anthropic needs system_prompt as a separate parameter.
         stream_kwargs: dict = {"messages": messages, "tools": tools}
@@ -647,11 +676,42 @@ class AgentLoop:
 
         async for event in self._stream_fn(**stream_kwargs):
             if isinstance(event, TextDelta):
-                _console.print(event.text, end="")
+                await self._emit_event(AssistantDeltaEvent(text=event.text))
             elif isinstance(event, StreamComplete):
                 response_message = event.message
-        _console.print()  # newline after streaming
         return response_message
+
+    async def _emit_event(self, event: RuntimeEvent) -> None:
+        """Emit a runtime event if this loop was wired to an event bus."""
+        if self._event_bus is not None:
+            await self._event_bus.emit(event)
+
+    async def _emit_mcp_diagnostics(self) -> None:
+        """Emit MCP connection diagnostics as frontend-neutral system events."""
+        statuses = self._mcp_manager.list_statuses()
+        tools_count = len(self._mcp_manager.list_tools())
+        connected = sum(1 for s in statuses if s.state == "connected")
+
+        if not statuses:
+            return
+
+        if connected > 0:
+            await self._emit_event(SystemRuntimeEvent(
+                message=(
+                    f"MCP: {connected} server(s) connected, "
+                    f"{tools_count} tool(s) available"
+                )
+            ))
+
+        for s in statuses:
+            if s.state == "failed":
+                await self._emit_event(SystemRuntimeEvent(
+                    message=f"! MCP server '{s.name}': {s.detail[:150]}"
+                ))
+            elif s.state == "pending":
+                await self._emit_event(SystemRuntimeEvent(
+                    message=f"MCP server '{s.name}' pending (will retry next run)"
+                ))
 
     async def _fire_hook(
         self, event: HookEvent, payload: dict
@@ -691,23 +751,11 @@ class AgentLoop:
         for m in messages:
             self.conversation.append(Message(**m))
 
-
-def _print_mcp_diagnostics(mcp_manager) -> None:
-    """Print a one-line summary of MCP server connection status."""
-    from rich.console import Console
-    c = Console()
-    statuses = mcp_manager.list_statuses()
-    tools_count = len(mcp_manager.list_tools())
-    connected = sum(1 for s in statuses if s.state == "connected")
-
-    if not statuses:
-        return
-
-    if connected > 0:
-        c.print(f"  [dim]MCP: {connected} server(s) connected, {tools_count} tool(s) available[/dim]")
-
-    for s in statuses:
-        if s.state == "failed":
-            c.print(f"  [yellow]! MCP server '{s.name}': {s.detail[:150]}[/yellow]")
-        elif s.state == "pending":
-            c.print(f"  [dim]MCP server '{s.name}' pending (will retry next run)[/dim]")
+def _format_compaction_summary(stats: dict) -> str:
+    before = stats.get("token_count") or stats.get("total_used") or 0
+    after = stats.get("tokens_after") or stats.get("token_count_after") or before
+    dropped = stats.get("dropped")
+    parts = [f"Context compacted: {before} -> {after} tokens"]
+    if dropped:
+        parts.append(f"dropped {dropped} message(s)")
+    return ", ".join(parts) + "."

@@ -38,6 +38,7 @@ from miniharness.commands.builtin import (
 from miniharness.commands.types import CommandResult
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
+from miniharness.runtime import RuntimeEventBus
 from miniharness.sessions import (
     list_sessions,
     load_session_by_id,
@@ -63,6 +64,7 @@ class RuntimeController:
     settings: Settings
     permission_prompt: PermissionPrompt | None = None
     compact_progress: CompactProgressHandler | None = None
+    event_bus: RuntimeEventBus | None = None
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
@@ -75,6 +77,7 @@ class RuntimeController:
             settings=self.settings,
             permission_prompt=self.permission_prompt,
             compact_progress=self.compact_progress,
+            event_bus=self.event_bus,
         )
         self.loop.session_id = uuid.uuid4().hex[:12]
         self.commands = self._build_command_registry()
@@ -308,6 +311,7 @@ class RuntimeController:
             target_id,
             permission_prompt=self.permission_prompt,
             compact_progress=self.compact_progress,
+            event_bus=self.event_bus,
         )
         if new_loop is None:
             return CommandResult.ok(f"Session '{target}' not found.")

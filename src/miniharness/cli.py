@@ -20,6 +20,17 @@ from miniharness.config import apply_cli_overrides, load_settings
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
 from miniharness.providers import get_profile
+from miniharness.runtime import (
+    AssistantCompleteEvent,
+    AssistantDeltaEvent,
+    CompactProgressRuntimeEvent,
+    RuntimeEvent,
+    RuntimeEventBus,
+    StatusRuntimeEvent,
+    SystemRuntimeEvent,
+    ToolCompletedEvent,
+    ToolStartedEvent,
+)
 from miniharness.sessions import (
     list_sessions,
     load_session_by_id,
@@ -48,6 +59,7 @@ def main(
     base_url: str | None = typer.Option(None, "--base-url", help="Override auto-detected base URL"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show resolved settings and exit"),
     max_turns: int | None = typer.Option(None, "--max-turns", help="Maximum agent loop turns"),
+    context_budget_ratio: float | None = typer.Option(None, "--context-budget-ratio", help="Soft context budget ratio before compaction (0 < ratio <= 1)"),
     temperature: float | None = typer.Option(None, "--temperature", help="LLM sampling temperature (0.0–2.0)"),
     top_p: float | None = typer.Option(None, "--top-p", help="LLM nucleus sampling threshold (0.0–1.0)"),
     max_tokens: int | None = typer.Option(None, "--max-tokens", help="Maximum output tokens"),
@@ -67,7 +79,8 @@ def main(
     settings = apply_cli_overrides(
         settings,
         profile=profile, model=model, base_url=base_url,
-        max_turns=max_turns, temperature=temperature, top_p=top_p,
+        max_turns=max_turns, context_budget_ratio=context_budget_ratio,
+        temperature=temperature, top_p=top_p,
         max_tokens=max_tokens, sandbox=sandbox, sandbox_image=sandbox_image,
     )
 
@@ -114,6 +127,7 @@ def _print_dry_run(root: Path, settings: Settings, prompt: str) -> None:
     console.print(f"- model: {settings.provider.model or provider_profile.default_model}")
     console.print(f"- base_url: {settings.provider.base_url or provider_profile.base_url or '(provider default)'}")
     console.print(f"- max_turns: {settings.max_turns}")
+    console.print(f"- context_budget_ratio: {settings.context_budget_ratio}")
     console.print(f"- sandbox.enabled: {settings.sandbox.enabled}")
     if settings.sandbox.enabled:
         console.print(f"- sandbox.image: {settings.sandbox.image}")
@@ -227,7 +241,8 @@ def _pick_session(root: Path) -> str:
 
 
 async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
-    runtime = RuntimeController(cwd=root, settings=settings)
+    event_bus = _create_cli_event_bus()
+    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
     try:
         await runtime.start()
         await runtime.handle_line(
@@ -251,7 +266,8 @@ async def _run_repl(
     settings: Settings,
     resume_session_id: str | None = None,
 ) -> None:
-    runtime = RuntimeController(cwd=root, settings=settings)
+    event_bus = _create_cli_event_bus()
+    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
 
     console.print("[bold]MiniHarness[/bold] — interactive mode")
     console.print("Type [dim]/help[/dim] for commands, [dim]/exit[/dim] to quit.")
@@ -343,3 +359,50 @@ def _should_print_non_streamed_result(result: str) -> bool:
     if not result:
         return False
     return _is_error_result(result)
+
+
+def _create_cli_event_bus() -> RuntimeEventBus:
+    bus = RuntimeEventBus()
+    bus.subscribe(_render_cli_runtime_event)
+    return bus
+
+
+def _render_cli_runtime_event(event: RuntimeEvent) -> None:
+    if isinstance(event, AssistantDeltaEvent):
+        console.print(event.text, end="")
+        return
+    if isinstance(event, AssistantCompleteEvent):
+        console.print()
+        return
+    if isinstance(event, ToolStartedEvent):
+        import json
+
+        payload = json.dumps(event.tool_input, ensure_ascii=False)
+        console.print(f"  [dim]→ {event.tool_name}({payload})[/dim]")
+        return
+    if isinstance(event, ToolCompletedEvent):
+        preview = event.output[:120].replace("\n", " ")
+        if event.is_error:
+            console.print(f"  [yellow]! {preview}[/yellow]")
+        elif event.tool_name.startswith("memory_"):
+            console.print(f"  [bold cyan]memory[/bold cyan] {preview}")
+        else:
+            suffix = "..." if len(event.output) > 120 else ""
+            console.print(f"  [dim]← {preview}{suffix}[/dim]")
+        return
+    if isinstance(event, SystemRuntimeEvent):
+        if event.message:
+            console.print(f"  [dim]{event.message}[/dim]")
+        return
+    if isinstance(event, StatusRuntimeEvent):
+        if event.message:
+            console.print(f"  [dim]{event.message}[/dim]")
+        return
+    if isinstance(event, CompactProgressRuntimeEvent):
+        phase = event.phase or "compact"
+        if event.compacted:
+            console.print(f"  [dim]compact {phase}: {event.tokens_after} tokens after compaction[/dim]")
+        elif event.token_count or event.soft_limit:
+            console.print(
+                f"  [dim]compact {phase}: {event.token_count}/{event.soft_limit}[/dim]"
+            )

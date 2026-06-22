@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from miniharness.config.settings import Settings
-from miniharness.llm import StreamComplete, TextDelta
 from miniharness.messages import Message
+from miniharness.runtime import AssistantCompleteEvent, AssistantDeltaEvent
 from miniharness.sessions.storage import load_latest_session, save_session_snapshot
 from miniharness.ui.backend_host import BackendHost
 from miniharness.ui.protocol import AssistantComplete, LineComplete, SystemMessage, TokenUsageEvent
@@ -238,31 +238,28 @@ async def test_backend_uses_runtime_for_slash_commands(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_backend_run_agent_stream_wrapper_remains_async_iterator(tmp_path: Path):
+async def test_backend_run_agent_relays_runtime_events(tmp_path: Path):
     host = BackendHost(cwd=tmp_path, settings=Settings())
     emitted: list[object] = []
     host._emit = emitted.append  # type: ignore[method-assign]
-    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
-
-    async def fake_stream(*args, **kwargs):
-        yield TextDelta("ok")
-        yield StreamComplete(Message(role="assistant", content="ok"))
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(),
+        event_bus=host.event_bus,
+    )
 
     async def fake_run(prompt: str) -> str:
         runtime.loop.conversation.append(Message(role="user", content=prompt))
-        response = None
-        async for event in runtime.loop.stream_fn(messages=[], tools=[]):
-            if isinstance(event, StreamComplete):
-                response = event.message
-        assert response is not None
+        await runtime.loop._emit_event(AssistantDeltaEvent(text="ok"))
+        response = Message(role="assistant", content="ok")
         runtime.loop.conversation.append(response)
         runtime.loop.last_context_stats = runtime.loop.budget.snapshot(
             runtime.loop.conversation.to_openai(),
             tools=[],
         )
+        await runtime.loop._emit_event(AssistantCompleteEvent(text="ok"))
         return response.content or ""
 
-    runtime.loop._stream_fn = fake_stream  # type: ignore[attr-defined]
     runtime.loop.run = fake_run  # type: ignore[method-assign]
 
     try:

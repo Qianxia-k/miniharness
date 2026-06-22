@@ -1,5 +1,6 @@
 import pytest
 
+from miniharness.config import apply_cli_overrides, load_settings
 from miniharness.context.budget import ContextBudget, count_tokens
 from miniharness.context.compiler import ContextCompiler
 from miniharness.config.settings import Settings
@@ -64,6 +65,22 @@ def test_context_budget_ratio_is_used_by_budget_factory():
     budget = ContextBudget.for_model("gpt-4o-mini", ratio=settings.context_budget_ratio)
 
     assert budget.max_tokens == int(budget.total * settings.context_budget_ratio)
+
+
+def test_default_context_budget_ratio_is_production_safe():
+    assert Settings().context_budget_ratio == 0.8
+
+
+def test_context_budget_ratio_can_be_set_from_env(monkeypatch):
+    monkeypatch.setenv("MINIHARNESS_CONTEXT_BUDGET_RATIO", "0.05")
+
+    assert load_settings().context_budget_ratio == 0.05
+
+
+def test_context_budget_ratio_cli_override_wins():
+    settings = apply_cli_overrides(Settings(), context_budget_ratio=0.05)
+
+    assert settings.context_budget_ratio == 0.05
 
 
 async def _never_called_llm(**kwargs):
