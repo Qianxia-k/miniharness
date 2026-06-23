@@ -1,28 +1,43 @@
-"""Task management tool — the agent tracks progress on complex work.
+"""Task management tool.
 
-Mirrors the ``TodoWrite`` tool in Claude Code / OpenHarness: the agent passes
-the **complete** task list on every invocation (replace-all semantics).  This
-is simpler for the model than individual CRUD operations.
+The model-facing tool uses replace-all semantics: every call submits the full
+task list.  The canonical state is owned by ``TaskListManager`` and stored in
+session ``tool_metadata`` so it survives compaction and session switching.
 """
 
 from __future__ import annotations
 
-import json
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from miniharness.tasks import TaskListManager, format_task_list
 from miniharness.tools.base import BaseTool, ToolResult
+
+
+class TaskItemInput(BaseModel):
+    """One model-submitted task item."""
+
+    id: str | None = Field(
+        default=None,
+        description="Stable task id from the previous task list. Omit for new tasks.",
+    )
+    content: str = Field(description="Concrete task description")
+    status: Literal["pending", "in_progress", "completed"] = Field(
+        description="Task status. Use at most one in_progress item."
+    )
 
 
 class TaskInput(BaseModel):
     """Arguments for task."""
 
-    tasks: str = Field(
+    tasks: list[TaskItemInput] = Field(
         description=(
-            "JSON array of ALL tasks the agent is working on. "
-            'Each task: {"content": "...", "status": "pending|in_progress|completed"}. '
+            "Complete task list. Each task has content and status "
+            "(pending, in_progress, completed). "
             "Include completed tasks so the user can see progress. "
-            "Pass the complete list every time — tasks not in the list are removed."
+            "Pass the complete list every time; omitted tasks are removed. "
+            "Use at most one in_progress task."
         )
     )
 
@@ -30,57 +45,26 @@ class TaskInput(BaseModel):
 class TaskTool(BaseTool):
     name = "task"
     description = (
-        "Manage a task list (todo list) to track progress on complex multi-step work. "
-        "Pass the COMPLETE task list every time — this replaces all previous tasks. "
-        "Each task has a 'content' (description) and 'status' "
-        "(pending / in_progress / completed). "
+        "Update the current task list for complex multi-step work. "
+        "Pass the COMPLETE task list every time; this replaces previous tasks. "
+        "Use statuses pending, in_progress, completed. "
+        "Use at most one in_progress item. "
         "Keep completed tasks in the list to show progress. "
         "Use this for any work that requires 3+ distinct steps."
     )
     input_model = TaskInput
 
+    def __init__(self, *args, manager: TaskListManager | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.manager = manager
+
     async def execute(self, arguments: TaskInput) -> ToolResult:
-        raw = arguments.tasks.strip()
-        if not raw:
-            return ToolResult("tasks is required — pass a JSON array of task objects", is_error=True)
+        if self.manager is None:
+            return ToolResult("Task manager is not available for this session.", is_error=True)
 
         try:
-            tasks: list[dict] = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            return ToolResult(f"Invalid JSON: {exc}", is_error=True)
+            tasks = self.manager.replace_all([item.model_dump() for item in arguments.tasks])
+        except ValueError as exc:
+            return ToolResult(str(exc), is_error=True)
 
-        if not isinstance(tasks, list):
-            return ToolResult("tasks must be a JSON array", is_error=True)
-
-        valid_statuses = {"pending", "in_progress", "completed"}
-        cleaned: list[dict] = []
-        for i, t in enumerate(tasks):
-            if not isinstance(t, dict):
-                return ToolResult(f"Task {i} is not an object", is_error=True)
-            content = str(t.get("content", "")).strip()
-            status = str(t.get("status", "pending")).strip()
-            if not content:
-                return ToolResult(f"Task {i} has empty content", is_error=True)
-            if status not in valid_statuses:
-                return ToolResult(
-                    f"Task {i} has invalid status '{status}' — use: {', '.join(sorted(valid_statuses))}",
-                    is_error=True,
-                )
-            cleaned.append({"content": content, "status": status})
-
-        # Render the task list back so the model sees the canonical state.
-        lines = ["Tasks:"]
-        status_icon = {"pending": "  ⬜", "in_progress": "  🔄", "completed": "  ✅"}
-        for i, t in enumerate(cleaned, 1):
-            icon = status_icon.get(t["status"], "  ❓")
-            lines.append(f"{i}.{icon} [{t['status']}] {t['content']}")
-
-        pending = sum(1 for t in cleaned if t["status"] == "pending")
-        in_progress = sum(1 for t in cleaned if t["status"] == "in_progress")
-        completed = sum(1 for t in cleaned if t["status"] == "completed")
-        lines.append(
-            f"\nSummary: {len(cleaned)} tasks "
-            f"({pending} pending, {in_progress} in progress, {completed} completed)"
-        )
-
-        return ToolResult("\n".join(lines))
+        return ToolResult(format_task_list(tasks))

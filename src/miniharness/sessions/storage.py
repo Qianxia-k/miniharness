@@ -96,6 +96,7 @@ def save_session_snapshot(
     session_id: str | None = None,
     tag: str = "",
     make_latest: bool = True,
+    session_state: dict[str, Any] | None = None,
 ) -> Path:
     """Persist a session snapshot.  Saves as both latest.json and session-{id}.json.
 
@@ -127,6 +128,7 @@ def save_session_snapshot(
         "summary": summary,
         "tag": tag,
         "message_count": len(messages),
+        "session_state": session_state or {},
     }
 
     session_path = session_dir / f"session-{sid}.json"

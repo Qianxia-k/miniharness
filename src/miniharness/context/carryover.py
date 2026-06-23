@@ -44,6 +44,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from miniharness.tasks import TaskListManager, format_task_list
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -68,6 +70,11 @@ def init_tool_metadata() -> dict[str, Any]:
         "recent_verified_work": [],
         "recent_work_log": [],
         "invoked_skills": [],
+        "task_list_state": {
+            "tasks": [],
+            "revision": 0,
+            "updated_at": 0.0,
+        },
     }
 
 
@@ -147,8 +154,8 @@ def record_tool_carryover(
         _carryover_skill(metadata, arguments)
     elif tool_name in ("memory_add", "memory_log", "memory_search"):
         pass  # memory tools are self-documenting
-    elif tool_name == "task":
-        pass  # task tool state is transient
+    elif tool_name == "task" and not is_error:
+        _remember_work_log(metadata, "Updated session task list")
 
     # ---- always log tool execution (even errors) -------------------------
     if is_error:
@@ -371,6 +378,7 @@ def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
 
     builders = [
         _build_task_focus_attachment,
+        _build_task_list_attachment,
         _build_recent_files_attachment,
         _build_invoked_skills_attachment,
         _build_verified_work_attachment,
@@ -414,6 +422,17 @@ def _build_task_focus_attachment(metadata: dict[str, Any]) -> dict[str, Any] | N
         return None
 
     return _render_attachment(kind="task_focus", title="Current Task & Progress", body="\n".join(lines))
+
+
+def _build_task_list_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    tasks = TaskListManager(metadata).list_tasks()
+    if not tasks:
+        return None
+    active = [task for task in tasks if task.status != "completed"]
+    if not active:
+        active = tasks[-5:]
+    body = format_task_list(active)
+    return _render_attachment(kind="task_list", title="Current Task List", body=body)
 
 
 def _build_recent_files_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:

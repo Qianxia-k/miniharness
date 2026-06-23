@@ -65,7 +65,10 @@ def _pydantic_to_openai(
         elif json_type == "array":
             prop["type"] = "array"
             if "items" in field_schema:
-                prop["items"] = field_schema["items"]
+                prop["items"] = _resolve_json_schema_refs(
+                    field_schema["items"],
+                    json_schema,
+                )
         else:
             prop["type"] = "string"
 
@@ -88,6 +91,27 @@ def _pydantic_to_openai(
                 "required": required,
             },
         },
+    }
+
+
+def _resolve_json_schema_refs(value: Any, root_schema: dict[str, Any]) -> Any:
+    """Inline local ``$defs`` references for model-facing tool schemas."""
+    if isinstance(value, list):
+        return [_resolve_json_schema_refs(item, root_schema) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    ref = value.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        name = ref.rsplit("/", 1)[-1]
+        target = root_schema.get("$defs", {}).get(name)
+        if isinstance(target, dict):
+            return _resolve_json_schema_refs(target, root_schema)
+
+    return {
+        key: _resolve_json_schema_refs(item, root_schema)
+        for key, item in value.items()
+        if key != "$defs"
     }
 
 

@@ -29,6 +29,7 @@ from miniharness.commands.builtin import (
     cmd_plugins,
     cmd_project,
     cmd_skills,
+    cmd_tasks,
     cmd_temperature,
     cmd_tokens,
     cmd_tools,
@@ -256,6 +257,7 @@ class RuntimeController:
         reg.register("clear", cmd_clear, description="Clear conversation history", source="builtin")
         reg.register("help", cmd_help, description="Show available commands", source="builtin")
         reg.register("history", cmd_history, description="Show message count", source="builtin")
+        reg.register("tasks", cmd_tasks, description="Show current task list", source="builtin")
         reg.register("tokens", cmd_tokens, description="Show current context token budget", source="builtin")
         reg.register("model", cmd_model, description="Show or switch the model", source="builtin")
         reg.register("turns", cmd_turns, description="Show or set max turns", source="builtin")

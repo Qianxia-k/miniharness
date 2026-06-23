@@ -40,6 +40,7 @@ def save_loop_snapshot(loop: AgentLoop, *, make_latest: bool = True) -> None:
         session_id=loop.session_id,
         tag=loop.tag,
         make_latest=make_latest,
+        session_state=loop.export_session_state(),
     )
 
 
@@ -79,6 +80,7 @@ def switch_session(
         event_bus=event_bus,
     )
     next_loop.restore_messages(data.get("messages", []))
+    next_loop.restore_session_state(data.get("session_state"))
     next_loop.session_id = data.get("session_id", target_session_id)
     next_loop.tag = data.get("tag", "")
     mark_session_latest(str(current_loop.cwd), next_loop.session_id)

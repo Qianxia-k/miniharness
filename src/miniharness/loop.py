@@ -107,6 +107,7 @@ from miniharness.runtime import (
     ToolStartedEvent,
 )
 from miniharness.skills import SkillTool, load_skill_registry
+from miniharness.tasks import TaskListManager
 from miniharness.tool_registry import create_default_registry
 from miniharness.tools.offload import offload_if_needed
 
@@ -234,6 +235,11 @@ class AgentLoop:
             }
             self._plugin_index.append(entry)
 
+        # ── Structured session state ──────────────────────────────────
+        self.tool_metadata = init_tool_metadata()
+        self.task_manager = TaskListManager(self.tool_metadata)
+        self.last_context_stats: dict[str, object] = {}
+
         # ── MCP: settings + plugins → manager → tool adapters ────────
         self._mcp_manager = McpClientManager(
             load_mcp_server_configs(settings, cwd=cwd, plugins=self._plugins)
@@ -244,6 +250,7 @@ class AgentLoop:
             is_tool_enabled=self._is_tool_enabled,
             plugin_index=self._plugin_index,
             permission_prompt=self._permission_prompt,
+            task_manager=self.task_manager,
         )
 
         # ── Skills: bundled + project + user + plugins → registry ────
@@ -283,10 +290,6 @@ class AgentLoop:
                 llm_stream=self._stream_fn,
             ),
         )
-
-        # ── Structured session state ──────────────────────────────────
-        self.tool_metadata = init_tool_metadata()
-        self.last_context_stats: dict[str, object] = {}
 
         # ── Session identity ──────────────────────────────────────────
         self.session_id: str | None = None
@@ -620,10 +623,19 @@ class AgentLoop:
         """Export all messages as JSON-serializable dicts."""
         return [msg.to_openai() for msg in self.conversation.messages]
 
+    def export_session_state(self) -> dict:
+        """Export non-message session state."""
+        import copy
+
+        return {
+            "tool_metadata": copy.deepcopy(self.tool_metadata),
+        }
+
     def restore_messages(self, messages_data: list[dict]) -> None:
         """Replace the conversation with previously-saved messages.
 
-        ``tool_metadata`` is NOT restored — session-scoped state starts fresh.
+        Message history and session state are restored separately so callers can
+        handle older snapshots that do not contain structured metadata.
         """
         self.conversation = Conversation()
         for data in messages_data:
@@ -631,6 +643,19 @@ class AgentLoop:
             if message.tool_calls:
                 message.tool_calls = normalize_tool_calls(message.tool_calls)
             self.conversation.append(message)
+
+    def restore_session_state(self, state: dict | None) -> None:
+        """Restore structured session state in place.
+
+        The dict object is mutated instead of replaced because tools hold
+        references to it through managers such as ``TaskListManager``.
+        """
+        self.tool_metadata.clear()
+        self.tool_metadata.update(init_tool_metadata())
+        if isinstance(state, dict):
+            metadata = state.get("tool_metadata")
+            if isinstance(metadata, dict):
+                self.tool_metadata.update(metadata)
 
     def set_model(self, model: str) -> None:
         """Switch the model and update dependent components."""
@@ -650,7 +675,8 @@ class AgentLoop:
         self.conversation.append(
             Message(role="system", content=self._build_system_prompt())
         )
-        self.tool_metadata = init_tool_metadata()
+        self.tool_metadata.clear()
+        self.tool_metadata.update(init_tool_metadata())
 
     # ------------------------------------------------------------------
     # Internal helpers

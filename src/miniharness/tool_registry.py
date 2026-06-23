@@ -156,6 +156,7 @@ def create_default_registry(
     is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
     plugin_index: list[dict] | None = None,
     permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+    task_manager=None,
 ) -> ToolRegistry:
     """Create a ToolRegistry with all built-in tools + MCP adapters.
 
@@ -185,7 +186,7 @@ def create_default_registry(
     registry.register(BashTool(cwd=cwd, permissions=permissions))
     # External & meta
     registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
-    registry.register(TaskTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskTool(cwd=cwd, permissions=permissions, manager=task_manager))
     # Memory (agent-managed, always allowed)
     registry.register(MemorySearchTool(cwd=cwd, permissions=permissions))
     registry.register(MemoryAddTool(cwd=cwd, permissions=permissions))

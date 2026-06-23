@@ -48,6 +48,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /exit, /quit, /q    Exit MiniHarness")
     lines.append("  /clear              Clear conversation history")
     lines.append("  /history            Show message count")
+    lines.append("  /tasks              Show current task list")
     lines.append("  /tokens             Show current context token budget")
     lines.append("  /model [name]       Show or switch the model")
     lines.append("  /turns [n]          Show or set max turns")
@@ -87,6 +88,16 @@ def cmd_history(args: str, ctx: CommandContext) -> CommandResult:
     """Show message count."""
     count = len(ctx.loop.conversation.messages)
     return CommandResult.ok(f"Conversation has {count} messages (including system prompt).")
+
+
+def cmd_tasks(args: str, ctx: CommandContext) -> CommandResult:
+    """Show the current session task list."""
+    from miniharness.tasks import format_task_list
+
+    manager = getattr(ctx.loop, "task_manager", None)
+    if manager is None:
+        return CommandResult.ok("Task manager is not available.")
+    return CommandResult.ok(format_task_list(manager.list_tasks()))
 
 
 def cmd_tokens(args: str, ctx: CommandContext) -> CommandResult:
