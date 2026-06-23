@@ -171,10 +171,12 @@ class RuntimeController:
 
             if result.should_save and not result.exit:
                 save_loop_snapshot(self.loop)
+            await self._notify_completed_background_tasks(print_system)
             return not result.exit
 
         await run_agent(self.loop, stripped)
         save_loop_snapshot(self.loop)
+        await self._notify_completed_background_tasks(print_system)
         self._schedule_memory_extraction(print_system)
         return True
 
@@ -238,6 +240,18 @@ class RuntimeController:
         message = _format_memory_extraction_result(result)
         if message:
             await print_system(message)
+
+    async def _notify_completed_background_tasks(self, print_system: SystemPrinter) -> None:
+        """Surface completed background tasks remembered by this session."""
+        try:
+            from miniharness.ui.coordinator_drain import drain_completed_background_tasks
+
+            await drain_completed_background_tasks(
+                self.loop.tool_metadata,
+                print_system=print_system,
+            )
+        except Exception:
+            return
 
     async def _replace_loop(self, new_loop: AgentLoop) -> None:
         old_mcp = getattr(self.loop, "_mcp_manager", None)

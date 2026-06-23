@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from miniharness.permissions import PermissionChecker
+from miniharness.context.carryover import build_compact_attachments, record_tool_carryover
 from miniharness.tasks import BackgroundTaskManager, reset_background_task_manager_for_tests
 from miniharness.tool_registry import create_default_registry
 
@@ -104,3 +105,40 @@ async def test_background_task_create_rejects_probable_mermaid(tmp_path: Path):
     assert result.is_error is True
     assert "probable Markdown/Mermaid" in result.output
     assert not (tmp_path / "L[AgentLoop]").exists()
+
+
+def test_background_task_carryover_survives_compaction_attachment():
+    metadata: dict = {}
+
+    record_tool_carryover(
+        metadata,
+        tool_name="task_create",
+        arguments={
+            "type": "local_bash",
+            "description": "run slow tests",
+            "command": "uv run pytest",
+        },
+        result_output="Created background task bg-abc12345 (local_bash)",
+        is_error=False,
+    )
+    record_tool_carryover(
+        metadata,
+        tool_name="task_output",
+        arguments={"task_id": "bg-abc12345"},
+        result_output="tests still running\ncollected 149 items",
+        is_error=False,
+    )
+
+    state = metadata["background_task_state"]
+    assert state[0]["id"] == "bg-abc12345"
+    assert state[0]["status"] == "running"
+    assert "tests still running" in state[0]["last_output_preview"]
+
+    attachments = build_compact_attachments(metadata)
+    background = [
+        item for item in attachments
+        if "[Compact attachment: background_tasks]" in item["content"]
+    ]
+    assert background
+    assert "bg-abc12345" in background[0]["content"]
+    assert "tests still running" in background[0]["content"]

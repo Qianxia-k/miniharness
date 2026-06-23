@@ -37,10 +37,16 @@ State tracked
     Skill names the agent has loaded via the ``skill`` tool.
     Feeds the ``invoked_skills`` compact attachment so the model
     remembers which skills are active after compaction.
+
+``background_task_state``
+    Recent background task IDs, statuses, and output previews.
+    Feeds the ``background_tasks`` compact attachment so the model can
+    continue polling long-running work after compaction.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -75,6 +81,7 @@ def init_tool_metadata() -> dict[str, Any]:
             "revision": 0,
             "updated_at": 0.0,
         },
+        "background_task_state": [],
     }
 
 
@@ -116,6 +123,7 @@ _MAX_ARTIFACTS = 8
 _MAX_VERIFIED = 10
 _MAX_WORK_LOG = 16
 _MAX_READ_FILE_STATE = 12
+_MAX_BACKGROUND_TASKS = 8
 
 
 def record_tool_carryover(
@@ -156,6 +164,21 @@ def record_tool_carryover(
         pass  # memory tools are self-documenting
     elif tool_name == "task" and not is_error:
         _remember_work_log(metadata, "Updated session task list")
+    elif tool_name in {
+        "task_create",
+        "task_list",
+        "task_get",
+        "task_output",
+        "task_stop",
+        "task_update",
+    }:
+        _carryover_background_task(
+            metadata,
+            tool_name=tool_name,
+            arguments=arguments,
+            result_output=result_output,
+            is_error=is_error,
+        )
 
     # ---- always log tool execution (even errors) -------------------------
     if is_error:
@@ -243,6 +266,64 @@ def _carryover_web_fetch(
     _remember_verified_work(metadata, f"Fetched {url[:120]}")
 
 
+def _carryover_background_task(
+    metadata: dict[str, Any],
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result_output: str,
+    is_error: bool,
+) -> None:
+    """Record background task state for compaction carryover."""
+    if is_error:
+        return
+
+    task_id = _extract_background_task_id(arguments, result_output)
+    if not task_id:
+        if tool_name == "task_list":
+            _remember_work_log(metadata, "Listed background tasks")
+        return
+
+    state = _background_task_bucket(metadata)
+    record = next((item for item in state if item.get("id") == task_id), None)
+    if record is None:
+        record = {"id": task_id}
+        state.append(record)
+
+    record["updated_at"] = time.time()
+    record["last_tool"] = tool_name
+
+    if tool_name == "task_create":
+        record["type"] = str(arguments.get("type") or "local_bash")
+        record["description"] = str(arguments.get("description") or "").strip()[:180]
+        record["command"] = str(arguments.get("command") or "").strip()[:240]
+        record["status"] = "running"
+        _remember_verified_work(
+            metadata,
+            f"Started background task {task_id}: {record.get('description', '')}",
+        )
+    elif tool_name == "task_get":
+        _merge_background_task_get_output(record, result_output)
+        _remember_work_log(metadata, f"Inspected background task {task_id}")
+    elif tool_name == "task_output":
+        record["last_output_preview"] = result_output.strip()[:240]
+        _remember_work_log(metadata, f"Read output for background task {task_id}")
+    elif tool_name == "task_stop":
+        record["status"] = "killed"
+        _remember_verified_work(metadata, f"Stopped background task {task_id}")
+    elif tool_name == "task_update":
+        progress = arguments.get("progress")
+        note = str(arguments.get("status_note") or "").strip()
+        if progress is not None:
+            record["progress"] = str(progress)
+        if note:
+            record["status_note"] = note[:180]
+        _remember_work_log(metadata, f"Updated background task {task_id}")
+
+    if len(state) > _MAX_BACKGROUND_TASKS:
+        del state[: len(state) - _MAX_BACKGROUND_TASKS]
+
+
 # ---------------------------------------------------------------------------
 # Helpers — artefact / verified-work / work-log management
 # ---------------------------------------------------------------------------
@@ -302,6 +383,40 @@ def _remember_work_log(metadata: dict[str, Any], entry: str) -> None:
         metadata["recent_work_log"] = wl[-_MAX_WORK_LOG:]
 
 
+def _background_task_bucket(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    bucket = metadata.setdefault("background_task_state", [])
+    if not isinstance(bucket, list):
+        bucket = []
+        metadata["background_task_state"] = bucket
+    return bucket
+
+
+def _extract_background_task_id(arguments: dict[str, Any], output: str) -> str:
+    task_id = str(arguments.get("task_id") or "").strip()
+    if task_id:
+        return task_id
+    match = re.search(r"\b(bg-[A-Za-z0-9_-]+)\b", output)
+    return match.group(1) if match else ""
+
+
+def _merge_background_task_get_output(record: dict[str, Any], output: str) -> None:
+    for line in output.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        normalized = key.strip()
+        if normalized in {
+            "type",
+            "status",
+            "description",
+            "cwd",
+            "command",
+            "output_file",
+            "return_code",
+        }:
+            record[normalized] = value.strip()
+
+
 # ---------------------------------------------------------------------------
 # Readout helpers (used by compact attachment builders)
 # ---------------------------------------------------------------------------
@@ -357,6 +472,16 @@ def get_recent_work_log(metadata: dict[str, Any], limit: int = 8) -> list[str]:
     return wl[:limit]
 
 
+def get_background_task_state(metadata: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+    """Return recent background task records, newest first."""
+    state = [
+        item for item in metadata.get("background_task_state", [])
+        if isinstance(item, dict)
+    ]
+    state.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    return state[:limit]
+
+
 # ---------------------------------------------------------------------------
 # Compact attachments — built from tool_metadata during compaction
 # ---------------------------------------------------------------------------
@@ -379,6 +504,7 @@ def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     builders = [
         _build_task_focus_attachment,
         _build_task_list_attachment,
+        _build_background_task_attachment,
         _build_recent_files_attachment,
         _build_invoked_skills_attachment,
         _build_verified_work_attachment,
@@ -433,6 +559,33 @@ def _build_task_list_attachment(metadata: dict[str, Any]) -> dict[str, Any] | No
         active = tasks[-5:]
     body = format_task_list(active)
     return _render_attachment(kind="task_list", title="Current Task List", body=body)
+
+
+def _build_background_task_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    tasks = get_background_task_state(metadata)
+    if not tasks:
+        return None
+
+    lines = ["Recent background tasks:"]
+    for task in tasks:
+        task_id = str(task.get("id") or "").strip()
+        status = str(task.get("status") or "unknown").strip()
+        description = str(task.get("description") or "").strip()
+        note = str(task.get("status_note") or "").strip()
+        preview = str(task.get("last_output_preview") or "").strip().replace("\n", " ")[:120]
+
+        line = f"- {task_id} [{status}] {description}".strip()
+        if note:
+            line += f" ({note})"
+        lines.append(line)
+        if preview:
+            lines.append(f"  output: {preview}")
+
+    return _render_attachment(
+        kind="background_tasks",
+        title="Background Task State",
+        body="\n".join(lines),
+    )
 
 
 def _build_recent_files_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
