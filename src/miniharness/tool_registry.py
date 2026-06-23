@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from miniharness.permissions import PermissionChecker, PermissionDecision
+from miniharness.tools.background_task import (
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskOutputTool,
+    TaskStopTool,
+    TaskUpdateTool,
+)
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
@@ -187,6 +195,12 @@ def create_default_registry(
     # External & meta
     registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
     registry.register(TaskTool(cwd=cwd, permissions=permissions, manager=task_manager))
+    registry.register(TaskCreateTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskListTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskGetTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskOutputTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskStopTool(cwd=cwd, permissions=permissions))
+    registry.register(TaskUpdateTool(cwd=cwd, permissions=permissions))
     # Memory (agent-managed, always allowed)
     registry.register(MemorySearchTool(cwd=cwd, permissions=permissions))
     registry.register(MemoryAddTool(cwd=cwd, permissions=permissions))

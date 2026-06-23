@@ -17,6 +17,12 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("bash") is not None
     assert registry.get("web_fetch") is not None
     assert registry.get("task") is not None
+    assert registry.get("task_create") is not None
+    assert registry.get("task_list") is not None
+    assert registry.get("task_get") is not None
+    assert registry.get("task_output") is not None
+    assert registry.get("task_stop") is not None
+    assert registry.get("task_update") is not None
     assert registry.get("memory_search") is not None
     assert registry.get("memory_add") is not None
     assert registry.get("memory_log") is not None

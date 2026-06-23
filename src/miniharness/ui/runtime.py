@@ -111,6 +111,16 @@ class RuntimeController:
                 pass
             self._sandbox_started = False
 
+        try:
+            from miniharness.tasks import get_background_task_manager
+
+            await asyncio.shield(asyncio.wait_for(
+                get_background_task_manager().close(),
+                timeout=3.0,
+            ))
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+
     async def drain_background_tasks(self, *, timeout: float | None = None) -> None:
         """Wait briefly for best-effort background work, then cancel leftovers."""
         if not self._background_tasks:
