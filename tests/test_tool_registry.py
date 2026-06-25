@@ -17,6 +17,12 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("bash") is not None
     assert registry.get("web_fetch") is not None
     assert registry.get("task") is not None
+    assert registry.get("agent") is not None
+    assert registry.get("agent_list") is not None
+    assert registry.get("send_message") is not None
+    assert registry.get("team_create") is not None
+    assert registry.get("team_list") is not None
+    assert registry.get("team_delete") is not None
     assert registry.get("task_create") is not None
     assert registry.get("task_list") is not None
     assert registry.get("task_get") is not None
@@ -26,6 +32,21 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("memory_search") is not None
     assert registry.get("memory_add") is not None
     assert registry.get("memory_log") is not None
+
+
+def test_default_registry_exposes_agent_messaging_tools_to_model(tmp_path: Path):
+    registry = create_default_registry(cwd=tmp_path, permissions=PermissionChecker(cwd=tmp_path))
+    names = {
+        tool["function"]["name"]
+        for tool in registry.to_openai_tools()
+    }
+
+    assert "agent" in names
+    assert "agent_list" in names
+    assert "send_message" in names
+    assert "team_create" in names
+    assert "team_list" in names
+    assert "team_delete" in names
 
 
 def test_unknown_tool(tmp_path: Path):

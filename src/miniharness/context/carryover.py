@@ -165,6 +165,8 @@ def record_tool_carryover(
     elif tool_name == "task" and not is_error:
         _remember_work_log(metadata, "Updated session task list")
     elif tool_name in {
+        "agent",
+        "send_message",
         "task_create",
         "task_list",
         "task_get",
@@ -293,7 +295,17 @@ def _carryover_background_task(
     record["updated_at"] = time.time()
     record["last_tool"] = tool_name
 
-    if tool_name == "task_create":
+    if tool_name == "agent":
+        record["type"] = "local_agent"
+        record["agent_id"] = _extract_agent_id(result_output)
+        record["subagent_type"] = str(arguments.get("subagent_type") or "agent").strip()[:80]
+        record["description"] = str(arguments.get("description") or "").strip()[:180]
+        record["status"] = "running"
+        _remember_verified_work(
+            metadata,
+            f"Spawned agent {record.get('agent_id') or task_id}: {record.get('description', '')}",
+        )
+    elif tool_name == "task_create":
         record["type"] = str(arguments.get("type") or "local_bash")
         record["description"] = str(arguments.get("description") or "").strip()[:180]
         record["command"] = str(arguments.get("command") or "").strip()[:240]
@@ -305,6 +317,11 @@ def _carryover_background_task(
     elif tool_name == "task_get":
         _merge_background_task_get_output(record, result_output)
         _remember_work_log(metadata, f"Inspected background task {task_id}")
+    elif tool_name == "send_message":
+        message = str(arguments.get("message") or "").strip()
+        if message:
+            record["last_message_preview"] = message[:240]
+        _remember_work_log(metadata, f"Sent message to background task {task_id}")
     elif tool_name == "task_output":
         record["last_output_preview"] = result_output.strip()[:240]
         _remember_work_log(metadata, f"Read output for background task {task_id}")
@@ -394,9 +411,26 @@ def _background_task_bucket(metadata: dict[str, Any]) -> list[dict[str, Any]]:
 def _extract_background_task_id(arguments: dict[str, Any], output: str) -> str:
     task_id = str(arguments.get("task_id") or "").strip()
     if task_id:
-        return task_id
+        return _normalize_background_task_id(task_id)
     match = re.search(r"\b(bg-[A-Za-z0-9_-]+)\b", output)
+    if match:
+        return match.group(1)
+    agent_match = re.search(r"\b(agent-[A-Za-z0-9_-]+)\b", output)
+    return _normalize_background_task_id(agent_match.group(1)) if agent_match else ""
+
+
+def _extract_agent_id(output: str) -> str:
+    spawned = re.search(r"\bSpawned agent\s+(\S+)\s+\(task_id=", output)
+    if spawned:
+        return spawned.group(1)
+    match = re.search(r"\b(agent-[A-Za-z0-9_-]+)\b", output)
     return match.group(1) if match else ""
+
+
+def _normalize_background_task_id(value: str) -> str:
+    if value.startswith("agent-"):
+        return "bg-" + value.removeprefix("agent-")
+    return value
 
 
 def _merge_background_task_get_output(record: dict[str, Any], output: str) -> None:
@@ -411,6 +445,8 @@ def _merge_background_task_get_output(record: dict[str, Any], output: str) -> No
             "description",
             "cwd",
             "command",
+            "prompt",
+            "argv",
             "output_file",
             "return_code",
         }:
@@ -569,15 +605,20 @@ def _build_background_task_attachment(metadata: dict[str, Any]) -> dict[str, Any
     lines = ["Recent background tasks:"]
     for task in tasks:
         task_id = str(task.get("id") or "").strip()
+        agent_id = str(task.get("agent_id") or "").strip()
         status = str(task.get("status") or "unknown").strip()
         description = str(task.get("description") or "").strip()
         note = str(task.get("status_note") or "").strip()
+        message = str(task.get("last_message_preview") or "").strip().replace("\n", " ")[:120]
         preview = str(task.get("last_output_preview") or "").strip().replace("\n", " ")[:120]
 
-        line = f"- {task_id} [{status}] {description}".strip()
+        label = f"{agent_id} ({task_id})" if agent_id else task_id
+        line = f"- {label} [{status}] {description}".strip()
         if note:
             line += f" ({note})"
         lines.append(line)
+        if message:
+            lines.append(f"  last message: {message}")
         if preview:
             lines.append(f"  output: {preview}")
 

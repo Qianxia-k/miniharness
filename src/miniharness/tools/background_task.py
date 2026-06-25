@@ -12,9 +12,11 @@ from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 class TaskCreateInput(BaseModel):
     """Arguments for creating a background task."""
 
-    type: str = Field(default="local_bash", description="Task type. Currently supports local_bash.")
+    type: str = Field(default="local_bash", description="Task type: local_bash or local_agent.")
     description: str = Field(description="Short human-readable task description")
     command: str | None = Field(default=None, description="Shell command for local_bash tasks")
+    prompt: str | None = Field(default=None, description="Prompt for local_agent tasks")
+    model: str | None = Field(default=None, description="Optional model override for local_agent tasks")
 
 
 class TaskCreateTool(BaseTool):
@@ -25,28 +27,49 @@ class TaskCreateTool(BaseTool):
     input_model = TaskCreateInput
 
     def permission_requests(self, arguments: TaskCreateInput) -> list[ToolPermissionRequest]:
-        if arguments.type != "local_bash" or not arguments.command:
-            return []
+        if arguments.type == "local_bash" and arguments.command:
+            return [ToolPermissionRequest(
+                is_read_only=False,
+                command=arguments.command,
+                reason=f"Allow task_create to run background command: {arguments.command[:120]}?",
+            )]
+        if arguments.type == "local_agent":
+            preview = arguments.command or f"local_agent: {arguments.description}"
+            return [ToolPermissionRequest(
+                is_read_only=False,
+                command=preview,
+                reason=f"Allow task_create to spawn local agent task: {arguments.description[:120]}?",
+            )]
         return [ToolPermissionRequest(
             is_read_only=False,
-            command=arguments.command,
-            reason=f"Allow task_create to run background command: {arguments.command[:120]}?",
+            reason=f"Allow task_create to create background task type {arguments.type}?",
         )]
 
     async def execute(self, arguments: TaskCreateInput) -> ToolResult:
-        if arguments.type != "local_bash":
-            return ToolResult(f"unsupported task type: {arguments.type}", is_error=True)
-        if not arguments.command:
-            return ToolResult("command is required for local_bash tasks", is_error=True)
-        markup_error = _reject_probable_markup(arguments.command)
-        if markup_error:
-            return ToolResult(markup_error, is_error=True)
         try:
-            task = await get_background_task_manager().create_shell_task(
-                command=arguments.command,
-                description=arguments.description,
-                cwd=self.cwd,
-            )
+            if arguments.type == "local_bash":
+                if not arguments.command:
+                    return ToolResult("command is required for local_bash tasks", is_error=True)
+                markup_error = _reject_probable_markup(arguments.command)
+                if markup_error:
+                    return ToolResult(markup_error, is_error=True)
+                task = await get_background_task_manager().create_shell_task(
+                    command=arguments.command,
+                    description=arguments.description,
+                    cwd=self.cwd,
+                )
+            elif arguments.type == "local_agent":
+                if not arguments.prompt:
+                    return ToolResult("prompt is required for local_agent tasks", is_error=True)
+                task = await get_background_task_manager().create_agent_task(
+                    prompt=arguments.prompt,
+                    description=arguments.description,
+                    cwd=self.cwd,
+                    model=arguments.model,
+                    command=arguments.command,
+                )
+            else:
+                return ToolResult(f"unsupported task type: {arguments.type}", is_error=True)
         except Exception as exc:
             return ToolResult(str(exc), is_error=True)
         return ToolResult(f"Created background task {task.id} ({task.type})")
@@ -64,6 +87,8 @@ class TaskListTool(BaseTool):
     name = "task_list"
     description = "List local background tasks."
     input_model = TaskListInput
+
+    def is_read_only(self, arguments: TaskListInput) -> bool: return True
 
     async def execute(self, arguments: TaskListInput) -> ToolResult:
         tasks = get_background_task_manager().list_tasks(status=arguments.status)
@@ -85,6 +110,8 @@ class TaskGetTool(BaseTool):
     description = "Get details for a background task."
     input_model = TaskGetInput
 
+    def is_read_only(self, arguments: TaskGetInput) -> bool: return True
+
     async def execute(self, arguments: TaskGetInput) -> ToolResult:
         task = get_background_task_manager().get_task(arguments.task_id)
         if task is None:
@@ -96,6 +123,8 @@ class TaskGetTool(BaseTool):
             f"description: {task.description}",
             f"cwd: {task.cwd}",
             f"command: {task.command}",
+            f"prompt: {(task.prompt or '')[:500]}",
+            f"argv: {task.argv or []}",
             f"output_file: {task.output_file}",
             f"return_code: {task.return_code}",
         ]
@@ -117,6 +146,8 @@ class TaskOutputTool(BaseTool):
     name = "task_output"
     description = "Read the captured output log for a background task."
     input_model = TaskOutputInput
+
+    def is_read_only(self, arguments: TaskOutputInput) -> bool: return True
 
     async def execute(self, arguments: TaskOutputInput) -> ToolResult:
         try:
@@ -176,4 +207,11 @@ class TaskUpdateTool(BaseTool):
             )
         except ValueError as exc:
             return ToolResult(str(exc), is_error=True)
-        return ToolResult(f"Updated background task {task.id}: {task.to_summary()}")
+        parts = [f"Updated background task {task.id}: {task.to_summary()}"]
+        progress_val = task.metadata.get("progress")
+        note_val = task.metadata.get("status_note")
+        if progress_val:
+            parts.append(f"progress={progress_val}%")
+        if note_val:
+            parts.append(f"note={note_val}")
+        return ToolResult(" ".join(parts))

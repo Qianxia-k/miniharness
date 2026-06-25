@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from miniharness.permissions import PermissionChecker, PermissionDecision
+from miniharness.tools.agent import AgentListTool, AgentTool
 from miniharness.tools.background_task import (
     TaskCreateTool,
     TaskGetTool,
@@ -27,7 +28,9 @@ from miniharness.tools.memory_tool import (
     MemorySearchTool,
 )
 from miniharness.tools.read_file import ReadFileTool
+from miniharness.tools.send_message import SendMessageTool
 from miniharness.tools.task import TaskTool
+from miniharness.tools.team import TeamCreateTool, TeamDeleteTool, TeamListTool
 from miniharness.tools.web_fetch import WebFetchTool
 from miniharness.tools.write_file import WriteFileTool
 from miniharness.tools.edit_file import EditFileTool
@@ -195,6 +198,12 @@ def create_default_registry(
     # External & meta
     registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
     registry.register(TaskTool(cwd=cwd, permissions=permissions, manager=task_manager))
+    registry.register(AgentTool(cwd=cwd, permissions=permissions))
+    registry.register(AgentListTool(cwd=cwd, permissions=permissions))
+    registry.register(SendMessageTool(cwd=cwd, permissions=permissions))
+    registry.register(TeamCreateTool(cwd=cwd, permissions=permissions))
+    registry.register(TeamListTool(cwd=cwd, permissions=permissions))
+    registry.register(TeamDeleteTool(cwd=cwd, permissions=permissions))
     registry.register(TaskCreateTool(cwd=cwd, permissions=permissions))
     registry.register(TaskListTool(cwd=cwd, permissions=permissions))
     registry.register(TaskGetTool(cwd=cwd, permissions=permissions))

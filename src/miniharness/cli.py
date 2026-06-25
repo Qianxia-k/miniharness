@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sys
 
 from dotenv import load_dotenv
 import typer
@@ -36,6 +37,7 @@ from miniharness.sessions import (
     load_session_by_id,
     load_session_by_tag,
 )
+from miniharness.tasks.worker_protocol import decode_worker_line
 from miniharness.ui.runtime import RuntimeController
 
 
@@ -70,6 +72,7 @@ def main(
     list_sessions_flag: bool = typer.Option(False, "--sessions", help="List saved sessions and exit"),
     tui: bool = typer.Option(False, "--tui", help="Launch the TUI frontend"),
     backend_only: bool = typer.Option(False, "--backend-only", help="Run in backend-only mode (for TUI to spawn)"),
+    task_worker: bool = typer.Option(False, "--task-worker", help="Run as a background agent worker", hidden=True),
 ) -> None:
     """Run a MiniHarness prompt, or start interactive REPL if no prompt given."""
     root = Path(cwd).expanduser().resolve()
@@ -95,6 +98,10 @@ def main(
     if backend_only:
         from miniharness.ui.backend_host import BackendHost
         asyncio.run(BackendHost(cwd=root, settings=settings).run())
+        raise typer.Exit(0)
+
+    if task_worker:
+        asyncio.run(_run_task_worker(root=root, settings=settings))
         raise typer.Exit(0)
 
     if tui:
@@ -251,6 +258,32 @@ async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
             print_system=_print_cli_system,
             clear_output=_clear_cli_output,
         )
+    finally:
+        await runtime.close()
+
+
+async def _run_task_worker(*, root: Path, settings: Settings) -> None:
+    """Run a stdin-driven background worker for delegated agent tasks."""
+    event_bus = _create_cli_event_bus()
+    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
+    try:
+        await runtime.start()
+        while True:
+            line = sys.stdin.readline()
+            if line == "":
+                break
+            prompt = decode_worker_line(line).strip()
+            if not prompt:
+                continue
+            should_continue = await runtime.handle_line(
+                prompt,
+                run_agent=_run_cli_agent,
+                print_system=_print_cli_system,
+                clear_output=_clear_cli_output,
+            )
+            if not should_continue:
+                break
+            sys.stdout.flush()
     finally:
         await runtime.close()
 
