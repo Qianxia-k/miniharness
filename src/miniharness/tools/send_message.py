@@ -45,7 +45,7 @@ class SendMessageTool(BaseTool):
             return ToolResult("message is required", is_error=True)
 
         if "@" in target:
-            executor = get_backend_registry().get_executor("subprocess")
+            executor = get_backend_registry().get_executor()
             try:
                 await executor.send_message(
                     target,

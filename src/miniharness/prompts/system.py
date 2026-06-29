@@ -33,6 +33,7 @@ from typing import Any
 
 from miniharness.memory.episodic import EpisodicStore
 from miniharness.memory.semantic import SemanticStore
+from miniharness.coordinator.prompt import build_delegation_section
 from miniharness.plugins.gating import is_mcp_server_visible
 
 # ---------------------------------------------------------------------------
@@ -239,6 +240,10 @@ def assemble_system_prompt(
             f"You have access to {tool_count} tools. Use them to read, write, "
             f"search, and execute code in the workspace."
         )
+
+    delegation_section = build_delegation_section(cwd, plugin_index=plugin_index)
+    if delegation_section:
+        sections.append(delegation_section)
 
     # 2b. MCP server status (if any connected).
     if mcp_manager is not None:

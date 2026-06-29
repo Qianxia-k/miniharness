@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from miniharness.coordinator.agent_definitions import get_agent_definition
+from miniharness.hooks import HookEvent
 from miniharness.swarm.registry import get_backend_registry
 from miniharness.swarm.types import TeammateSpawnConfig
+from miniharness.tasks import get_background_task_manager
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 
 
@@ -45,6 +48,18 @@ class AgentTool(BaseTool):
     )
     input_model = AgentInput
 
+    def __init__(
+        self,
+        *,
+        cwd,
+        permissions,
+        plugin_index: list[dict] | None = None,
+        hook_executor=None,
+    ) -> None:
+        super().__init__(cwd=cwd, permissions=permissions)
+        self.plugin_index = plugin_index
+        self.hook_executor = hook_executor
+
     def permission_requests(self, arguments: AgentInput) -> list[ToolPermissionRequest]:
         description = arguments.description.strip()
         preview = arguments.command or f"local_agent: {description}"
@@ -62,24 +77,117 @@ class AgentTool(BaseTool):
         if not prompt:
             return ToolResult("prompt is required", is_error=True)
 
-        executor = get_backend_registry().get_executor("subprocess")
+        agent_def = get_agent_definition(
+            arguments.subagent_type,
+            cwd=self.cwd,
+            plugins=self._plugins_from_index(),
+        )
+        agent_name = (
+            agent_def.spawn_name()
+            if agent_def is not None
+            else (arguments.subagent_type or "agent")
+        )
+        model = arguments.model
+        if model is None and agent_def is not None:
+            model = agent_def.model
+        metadata = {}
+        if agent_def is not None:
+            metadata = {
+                "agent_definition": agent_def.name,
+                "agent_definition_source": agent_def.source,
+            }
+            if agent_def.permission_mode:
+                metadata["agent_permission_mode"] = agent_def.permission_mode
+            if agent_def.path:
+                metadata["agent_definition_path"] = agent_def.path
+            if agent_def.disallowed_tools:
+                metadata["agent_disallowed_tools"] = ",".join(agent_def.disallowed_tools)
+
+        executor = get_backend_registry().get_executor()
         result = await executor.spawn(
             TeammateSpawnConfig(
-                name=arguments.subagent_type or "agent",
+                name=agent_name,
                 team=arguments.team or "default",
                 prompt=prompt,
                 description=description,
                 cwd=self.cwd,
-                model=arguments.model,
+                model=model,
                 command=arguments.command,
+                system_prompt=agent_def.system_prompt if agent_def is not None else None,
+                system_prompt_mode=(
+                    agent_def.system_prompt_mode if agent_def is not None else None
+                ),
+                hooks=agent_def.hooks if agent_def is not None else None,
+                metadata=metadata,
             )
         )
         if not result.success:
             return ToolResult(result.error or "Failed to spawn agent", is_error=True)
+        await self._register_subagent_stop_hook(
+            result=result,
+            description=description,
+            subagent_type=arguments.subagent_type or "agent",
+            team=arguments.team or "default",
+        )
         return ToolResult(
             f"Spawned agent {result.agent_id} "
-            f"(task_id={result.task_id}, backend={result.backend_type})"
+            f"(task_id={result.task_id}, backend={result.backend_type})",
+            metadata={
+                "agent_id": result.agent_id,
+                "task_id": result.task_id,
+                "backend_type": result.backend_type,
+                "description": description,
+            },
         )
+
+    async def _register_subagent_stop_hook(
+        self,
+        *,
+        result,
+        description: str,
+        subagent_type: str,
+        team: str,
+    ) -> None:
+        if self.hook_executor is None:
+            return
+        manager = get_background_task_manager()
+        unregister = None
+
+        async def emit_subagent_stop(task_record) -> None:
+            nonlocal unregister
+            if task_record.id != result.task_id:
+                return
+            if unregister is not None:
+                unregister()
+                unregister = None
+            await self.hook_executor.execute(
+                HookEvent.SUBAGENT_STOP,
+                {
+                    "agent_id": result.agent_id,
+                    "task_id": result.task_id,
+                    "backend_type": result.backend_type,
+                    "status": task_record.status,
+                    "return_code": task_record.return_code,
+                    "description": description,
+                    "subagent_type": subagent_type,
+                    "team": team,
+                },
+            )
+
+        unregister = manager.register_completion_listener(emit_subagent_stop)
+        task_record = manager.get_task(result.task_id)
+        if task_record is not None and task_record.status in {"completed", "failed", "killed"}:
+            await emit_subagent_stop(task_record)
+
+    def _plugins_from_index(self) -> list | None:
+        if self.plugin_index is None:
+            return None
+        plugins = []
+        for entry in self.plugin_index:
+            plugin = entry.get("_plugin") if isinstance(entry, dict) else None
+            if plugin is not None:
+                plugins.append(plugin)
+        return plugins
 
 
 class AgentListTool(BaseTool):
@@ -89,41 +197,18 @@ class AgentListTool(BaseTool):
     description = "List delegated local agents, their teams, task IDs, and current task status."
     input_model = AgentListInput
 
-    def is_read_only(self, arguments: AgentListInput) -> bool: return True
-
     async def execute(self, arguments: AgentListInput) -> ToolResult:
-        from miniharness.tasks import (
-            get_agent_registry,
-            get_background_task_manager,
-            get_team_registry,
-            team_store_path,
-        )
-
-        manager = get_background_task_manager()
-        agents = get_agent_registry()
-        teams = get_team_registry()
-        agents.restore_from_tasks(manager.list_tasks())
-        teams.load(team_store_path(manager.tasks_dir))
-        teams.restore_from_agents(agents.list_agents())
-
-        team = (arguments.team or "").strip()
-        records = agents.list_agents()
-        if team:
-            records = [record for record in records if record.team == team]
-        if not records:
+        executor = get_backend_registry().get_executor()
+        statuses = executor.list_agents(team=arguments.team)
+        if not statuses:
             return ToolResult("(no delegated agents)")
 
         lines: list[str] = []
-        for record in records:
-            task = manager.get_task(record.task_id)
-            status = task.status if task is not None else "missing"
-            note = ""
-            if task is not None:
-                raw_note = task.metadata.get("status_note", "")
-                note = f" ({raw_note})" if raw_note else ""
+        for status in statuses:
+            note = f" ({status.status_note})" if status.status_note else ""
             lines.append(
-                f"{record.agent_id} task_id={record.task_id} "
-                f"status={status}{note} backend={record.backend_type} "
-                f"description={record.description}"
+                f"{status.agent_id} task_id={status.task_id} "
+                f"status={status.status}{note} backend={status.backend_type} "
+                f"description={status.description}"
             )
         return ToolResult("\n".join(lines))

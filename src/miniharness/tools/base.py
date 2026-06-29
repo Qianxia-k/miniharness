@@ -21,6 +21,7 @@ from miniharness.permissions import PermissionChecker
 class ToolResult:
     output: str
     is_error: bool = False
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,11 @@ class BaseTool:
     async def execute(self, arguments: BaseModel) -> ToolResult:
         """Execute this tool with a validated Pydantic model instance."""
         raise NotImplementedError
+
+    def is_read_only(self, arguments: BaseModel) -> bool:
+        """Return whether this invocation only reads state."""
+        del arguments
+        return False
 
     def permission_requests(self, arguments: BaseModel) -> list[ToolPermissionRequest]:
         """Return registry-level permission checks required before execution.

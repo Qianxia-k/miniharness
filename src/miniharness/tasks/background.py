@@ -18,13 +18,13 @@ import asyncio
 import json
 import os
 import signal
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
+from miniharness.swarm.spawn_utils import build_teammate_argv
 from miniharness.tasks.worker_protocol import encode_worker_message
 
 
@@ -68,7 +68,6 @@ class BackgroundTaskRecord:
             "command": self.command,
             "prompt": self.prompt,
             "argv": list(self.argv) if self.argv is not None else None,
-            "env": dict(self.env) if self.env is not None else None,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -116,34 +115,8 @@ class BackgroundTaskRecord:
             started_at=started_at,
             ended_at=_optional_float(payload.get("ended_at")),
             return_code=_optional_int(payload.get("return_code")),
-            env=_optional_str_dict(payload.get("env")),
             metadata={str(key): str(value) for key, value in metadata.items()},
         )
-
-
-def _inherit_parent_env() -> dict[str, str]:
-    """Build env vars inherited by all spawned child processes."""
-    env: dict[str, str] = {}
-    for key in (
-        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-        "OPENAI_API_KEY", "OPENAI_BASE_URL",
-        "DASHSCOPE_API_KEY",
-        "MINIHARNESS_API_KEY", "MINIHARNESS_BASE_URL",
-        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-        "http_proxy", "https_proxy", "no_proxy",
-        "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
-        "PATH", "HOME", "USER",
-    ):
-        val = os.environ.get(key)
-        if val:
-            env[key] = val
-    return env
-
-
-def _optional_str_dict(raw: object) -> dict[str, str] | None:
-    if not isinstance(raw, dict):
-        return None
-    return {str(k): str(v) for k, v in raw.items()}
 
 
 class BackgroundTaskManager:
@@ -158,7 +131,8 @@ class BackgroundTaskManager:
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._output_locks: dict[str, asyncio.Lock] = {}
         self._input_locks: dict[str, asyncio.Lock] = {}
-        self._completion_listeners: list = []
+        self._runtime_envs: dict[str, dict[str, str]] = {}
+        self._completion_listeners: dict[str, Callable[[BackgroundTaskRecord], Any]] = {}
         self._load_index()
 
     async def create_shell_task(
@@ -262,14 +236,15 @@ class BackgroundTaskManager:
             command=command,
             prompt=prompt,
             argv=list(argv) if argv is not None else None,
-            env=extra_env or _inherit_parent_env(),
             created_at=now,
             started_at=now,
         )
         self._tasks[task_id] = record
         self._output_locks[task_id] = asyncio.Lock()
+        if extra_env:
+            self._runtime_envs[task_id] = dict(extra_env)
 
-        process = await self._start_process(record, env=record.env)
+        process = await self._start_process(record, env=extra_env)
         self._processes[task_id] = process
         self._watchers[task_id] = asyncio.create_task(
             self._watch_process(task_id, process)
@@ -311,17 +286,25 @@ class BackgroundTaskManager:
             process.stdin.write(encode_worker_message(message))
             await process.stdin.drain()
 
-    def register_completion_listener(self, listener) -> None:
+    def register_completion_listener(self, listener) -> Callable[[], None]:
         """Register a callback invoked when any task completes.
 
         The listener receives ``(record: BackgroundTaskRecord)``.
         """
-        self._completion_listeners.append(listener)
+        listener_id = uuid.uuid4().hex
+        self._completion_listeners[listener_id] = listener
+
+        def unregister() -> None:
+            self._completion_listeners.pop(listener_id, None)
+
+        return unregister
 
     async def _fire_completion_listeners(self, record: BackgroundTaskRecord) -> None:
-        for listener in self._completion_listeners:
+        for listener in list(self._completion_listeners.values()):
             try:
-                await listener(record)
+                maybe_awaitable = listener(record)
+                if maybe_awaitable is not None:
+                    await maybe_awaitable
             except Exception:
                 pass
 
@@ -482,7 +465,8 @@ class BackgroundTaskManager:
         return process
 
     async def _start_process(self, record: BackgroundTaskRecord, *, env: dict[str, str] | None = None) -> asyncio.subprocess.Process:
-        process_env = (env or record.env or _inherit_parent_env())
+        process_env = dict(os.environ)
+        process_env.update(env or self._runtime_envs.get(record.id) or {})
         process_env["MINIHARNESS_BACKGROUND_TASK_ID"] = record.id
         process_env["MINIHARNESS_BACKGROUND_TASK_TYPE"] = record.type
         if record.argv is not None:
@@ -624,17 +608,7 @@ def _default_tasks_dir() -> Path:
 
 
 def _default_agent_argv(*, cwd: str | Path, model: str | None = None) -> list[str]:
-    argv = [
-        sys.executable,
-        "-m",
-        "miniharness",
-        "--cwd",
-        str(Path(cwd).expanduser().resolve()),
-        "--task-worker",
-    ]
-    if model:
-        argv.extend(["--model", model])
-    return argv
+    return build_teammate_argv(cwd=cwd, model=model)
 
 
 def _optional_float(value: Any) -> float | None:

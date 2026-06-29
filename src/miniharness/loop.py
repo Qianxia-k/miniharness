@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from miniharness.config.settings import Settings
 from miniharness.context.budget import ContextBudget
@@ -117,7 +117,11 @@ from miniharness.tools.offload import offload_if_needed
 # ---------------------------------------------------------------------------
 
 
-def _build_hooks_config(hook_settings) -> dict:
+def _build_hooks_config(
+    hook_settings,
+    *,
+    session_hooks: dict[str, Any] | None = None,
+) -> dict:
     """Build the full hooks configuration dict from ``HookSettings``.
 
     This is the bridge between user configuration (Settings) and the
@@ -149,7 +153,29 @@ def _build_hooks_config(hook_settings) -> dict:
     if hs.custom_hooks:
         merge_config(config, hs.custom_hooks)
 
+    normalized_session_hooks = _normalize_hooks_config(session_hooks)
+    if normalized_session_hooks:
+        merge_config(config, normalized_session_hooks)
+
     return config
+
+
+def _normalize_hooks_config(raw: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    """Normalize agent/session hook config into registry-ready shape."""
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for event, hooks in raw.items():
+        event_name = str(event).strip()
+        if not event_name:
+            continue
+        if isinstance(hooks, dict):
+            normalized[event_name] = [hooks]
+        elif isinstance(hooks, list):
+            hook_list = [hook for hook in hooks if isinstance(hook, dict)]
+            if hook_list:
+                normalized[event_name] = hook_list
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -185,12 +211,17 @@ class AgentLoop:
         permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
         compact_progress: Callable[[dict], Awaitable[None]] | None = None,
         event_bus: RuntimeEventBus | None = None,
+        system_prompt_override: str | None = None,
+        system_prompt_mode: str | None = None,
+        session_hooks: dict[str, Any] | None = None,
     ) -> None:
         self.cwd = cwd
         self.settings = settings
         self._permission_prompt = permission_prompt
         self._compact_progress = compact_progress
         self._event_bus = event_bus
+        self._system_prompt_override = (system_prompt_override or "").strip()
+        self._system_prompt_mode = system_prompt_mode or "append"
 
         # ── Provider & model ──────────────────────────────────────────
         provider_profile = get_profile(settings.provider.name)
@@ -240,6 +271,18 @@ class AgentLoop:
         self.task_manager = TaskListManager(self.tool_metadata)
         self.last_context_stats: dict[str, object] = {}
 
+        # ── Hooks: settings + plugins → registry → executor ──────────
+        self.hook_registry = load_hook_registry(
+            _build_hooks_config(settings.hooks, session_hooks=session_hooks), plugins=self._plugins,
+        )
+        self._hook_executor = HookExecutor(
+            registry=self.hook_registry,
+            context=HookExecutionContext(
+                cwd=cwd,
+                llm_stream=self._stream_fn,
+            ),
+        )
+
         # ── MCP: settings + plugins → manager → tool adapters ────────
         self._mcp_manager = McpClientManager(
             load_mcp_server_configs(settings, cwd=cwd, plugins=self._plugins)
@@ -251,6 +294,7 @@ class AgentLoop:
             plugin_index=self._plugin_index,
             permission_prompt=self._permission_prompt,
             task_manager=self.task_manager,
+            hook_executor=self._hook_executor,
         )
 
         # ── Skills: bundled + project + user + plugins → registry ────
@@ -277,18 +321,6 @@ class AgentLoop:
             llm_stream=self._stream_fn,
             keep_last_n_turns=settings.keep_last_n_turns,
             compact_progress=self._compact_progress,
-        )
-
-        # ── Hooks: settings + plugins → registry → executor ──────────
-        self.hook_registry = load_hook_registry(
-            _build_hooks_config(settings.hooks), plugins=self._plugins,
-        )
-        self._hook_executor = HookExecutor(
-            registry=self.hook_registry,
-            context=HookExecutionContext(
-                cwd=cwd,
-                llm_stream=self._stream_fn,
-            ),
         )
 
         # ── Session identity ──────────────────────────────────────────
@@ -566,6 +598,7 @@ class AgentLoop:
                 arguments=arguments,
                 result_output=result.output,  # use full output for carryover
                 is_error=result.is_error,
+                result_metadata=result.metadata,
             )
 
             # Append to conversation (use offloaded text if applicable).
@@ -588,7 +621,7 @@ class AgentLoop:
         """Assemble the full system prompt for a turn."""
         core_text = self.core_memory.render_for_system_prompt()
         instructions = load_project_instructions(self.cwd) or ""
-        return assemble_system_prompt(
+        prompt = assemble_system_prompt(
             base_prompt=SYSTEM_PROMPT,
             cwd=self.cwd,
             core_memory_text=core_text,
@@ -599,6 +632,15 @@ class AgentLoop:
             plugin_index=self._plugin_index,
             project_instructions=instructions,
         )
+        if self._system_prompt_override:
+            if self._system_prompt_mode == "replace":
+                return self._system_prompt_override
+            return (
+                f"{prompt}\n\n"
+                "## Delegated Agent Role\n"
+                f"{self._system_prompt_override}"
+            )
+        return prompt
 
     def _is_tool_enabled(self, name: str, tool) -> bool:
         """Runtime tool gating for plugin-contributed capabilities."""

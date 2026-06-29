@@ -42,6 +42,13 @@ State tracked
     Recent background task IDs, statuses, and output previews.
     Feeds the ``background_tasks`` compact attachment so the model can
     continue polling long-running work after compaction.
+
+``async_agent_tasks``
+    OpenHarness-style table of delegated local-agent tasks that still need
+    coordinator notifications.
+
+``async_agent_state``
+    Compact activity log for agent/send_message actions.
 """
 
 from __future__ import annotations
@@ -82,6 +89,8 @@ def init_tool_metadata() -> dict[str, Any]:
             "updated_at": 0.0,
         },
         "background_task_state": [],
+        "async_agent_tasks": [],
+        "async_agent_state": [],
     }
 
 
@@ -124,6 +133,8 @@ _MAX_VERIFIED = 10
 _MAX_WORK_LOG = 16
 _MAX_READ_FILE_STATE = 12
 _MAX_BACKGROUND_TASKS = 8
+_MAX_ASYNC_AGENT_TASKS = 12
+_MAX_ASYNC_AGENT_EVENTS = 12
 
 
 def record_tool_carryover(
@@ -133,6 +144,7 @@ def record_tool_carryover(
     arguments: dict[str, Any],
     result_output: str,
     is_error: bool,
+    result_metadata: dict[str, Any] | None = None,
 ) -> None:
     """After every successful tool execution, update structured session state.
 
@@ -164,9 +176,16 @@ def record_tool_carryover(
         pass  # memory tools are self-documenting
     elif tool_name == "task" and not is_error:
         _remember_work_log(metadata, "Updated session task list")
+    elif tool_name in {"agent", "send_message"}:
+        _carryover_async_agent(
+            metadata,
+            tool_name=tool_name,
+            arguments=arguments,
+            result_output=result_output,
+            is_error=is_error,
+            result_metadata=result_metadata,
+        )
     elif tool_name in {
-        "agent",
-        "send_message",
         "task_create",
         "task_list",
         "task_get",
@@ -295,17 +314,7 @@ def _carryover_background_task(
     record["updated_at"] = time.time()
     record["last_tool"] = tool_name
 
-    if tool_name == "agent":
-        record["type"] = "local_agent"
-        record["agent_id"] = _extract_agent_id(result_output)
-        record["subagent_type"] = str(arguments.get("subagent_type") or "agent").strip()[:80]
-        record["description"] = str(arguments.get("description") or "").strip()[:180]
-        record["status"] = "running"
-        _remember_verified_work(
-            metadata,
-            f"Spawned agent {record.get('agent_id') or task_id}: {record.get('description', '')}",
-        )
-    elif tool_name == "task_create":
+    if tool_name == "task_create":
         record["type"] = str(arguments.get("type") or "local_bash")
         record["description"] = str(arguments.get("description") or "").strip()[:180]
         record["command"] = str(arguments.get("command") or "").strip()[:240]
@@ -317,11 +326,6 @@ def _carryover_background_task(
     elif tool_name == "task_get":
         _merge_background_task_get_output(record, result_output)
         _remember_work_log(metadata, f"Inspected background task {task_id}")
-    elif tool_name == "send_message":
-        message = str(arguments.get("message") or "").strip()
-        if message:
-            record["last_message_preview"] = message[:240]
-        _remember_work_log(metadata, f"Sent message to background task {task_id}")
     elif tool_name == "task_output":
         record["last_output_preview"] = result_output.strip()[:240]
         _remember_work_log(metadata, f"Read output for background task {task_id}")
@@ -339,6 +343,86 @@ def _carryover_background_task(
 
     if len(state) > _MAX_BACKGROUND_TASKS:
         del state[: len(state) - _MAX_BACKGROUND_TASKS]
+
+
+def _carryover_async_agent(
+    metadata: dict[str, Any],
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result_output: str,
+    is_error: bool,
+    result_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Record OpenHarness-style async agent state."""
+    if is_error:
+        return
+
+    _remember_async_agent_activity(
+        metadata,
+        tool_name=tool_name,
+        arguments=arguments,
+        result_output=result_output,
+    )
+    if tool_name != "agent":
+        _remember_work_log(metadata, f"Async agent action via {tool_name}")
+        return
+
+    agent_id, task_id = _extract_spawned_agent_identity(
+        arguments,
+        result_output,
+        result_metadata,
+    )
+    if not task_id or not agent_id:
+        return
+
+    bucket = _async_agent_task_bucket(metadata)
+    bucket[:] = [
+        existing
+        for existing in bucket
+        if not isinstance(existing, dict)
+        or str(existing.get("task_id") or "").strip() != task_id
+    ]
+    description = str(arguments.get("description") or arguments.get("prompt") or "").strip()
+    bucket.append({
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "description": description[:240],
+        "status": "spawned",
+        "notification_sent": False,
+        "spawned_at": time.time(),
+    })
+    if len(bucket) > _MAX_ASYNC_AGENT_TASKS:
+        del bucket[:-_MAX_ASYNC_AGENT_TASKS]
+
+    _remember_verified_work(
+        metadata,
+        f"Confirmed async-agent activity via agent: {description[:180]}",
+    )
+    _remember_work_log(metadata, "Async agent action via agent")
+
+
+def _remember_async_agent_activity(
+    metadata: dict[str, Any],
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result_output: str,
+) -> None:
+    bucket = _async_agent_state_bucket(metadata)
+    if tool_name == "agent":
+        description = str(arguments.get("description") or arguments.get("prompt") or "").strip()
+        summary = f"Spawned async agent. {description}".strip()
+        if result_output.strip():
+            summary = f"{summary} [{result_output.strip()[:180]}]".strip()
+    elif tool_name == "send_message":
+        target = str(arguments.get("task_id") or "").strip()
+        summary = f"Sent follow-up message to async agent {target}".strip()
+    else:
+        summary = result_output.strip()[:220] or f"Async agent activity via {tool_name}"
+    bucket.append(summary)
+    if len(bucket) > _MAX_ASYNC_AGENT_EVENTS:
+        del bucket[:-_MAX_ASYNC_AGENT_EVENTS]
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +492,22 @@ def _background_task_bucket(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     return bucket
 
 
+def _async_agent_task_bucket(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    bucket = metadata.setdefault("async_agent_tasks", [])
+    if not isinstance(bucket, list):
+        bucket = []
+        metadata["async_agent_tasks"] = bucket
+    return bucket
+
+
+def _async_agent_state_bucket(metadata: dict[str, Any]) -> list[str]:
+    bucket = metadata.setdefault("async_agent_state", [])
+    if not isinstance(bucket, list):
+        bucket = []
+        metadata["async_agent_state"] = bucket
+    return bucket
+
+
 def _extract_background_task_id(arguments: dict[str, Any], output: str) -> str:
     task_id = str(arguments.get("task_id") or "").strip()
     if task_id:
@@ -425,6 +525,19 @@ def _extract_agent_id(output: str) -> str:
         return spawned.group(1)
     match = re.search(r"\b(agent-[A-Za-z0-9_-]+)\b", output)
     return match.group(1) if match else ""
+
+
+def _extract_spawned_agent_identity(
+    arguments: dict[str, Any],
+    output: str,
+    result_metadata: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    if isinstance(result_metadata, dict):
+        agent_id = str(result_metadata.get("agent_id") or "").strip()
+        task_id = str(result_metadata.get("task_id") or "").strip()
+        if agent_id and task_id:
+            return agent_id, _normalize_background_task_id(task_id)
+    return _extract_agent_id(output), _extract_background_task_id(arguments, output)
 
 
 def _normalize_background_task_id(value: str) -> str:
@@ -518,6 +631,30 @@ def get_background_task_state(metadata: dict[str, Any], limit: int = 6) -> list[
     return state[:limit]
 
 
+def get_async_agent_tasks(metadata: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """Return recent delegated agent task records, newest first."""
+    state = [
+        item for item in metadata.get("async_agent_tasks", [])
+        if isinstance(item, dict)
+    ]
+    state.sort(
+        key=lambda item: float(item.get("spawned_at") or item.get("updated_at") or 0),
+        reverse=True,
+    )
+    return state[:limit]
+
+
+def get_async_agent_state(metadata: dict[str, Any], limit: int = 8) -> list[str]:
+    """Return recent async-agent activity entries, newest first."""
+    state = [
+        str(item)
+        for item in metadata.get("async_agent_state", [])
+        if str(item).strip()
+    ]
+    state.reverse()
+    return state[:limit]
+
+
 # ---------------------------------------------------------------------------
 # Compact attachments — built from tool_metadata during compaction
 # ---------------------------------------------------------------------------
@@ -540,6 +677,7 @@ def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     builders = [
         _build_task_focus_attachment,
         _build_task_list_attachment,
+        _build_async_agent_attachment,
         _build_background_task_attachment,
         _build_recent_files_attachment,
         _build_invoked_skills_attachment,
@@ -625,6 +763,34 @@ def _build_background_task_attachment(metadata: dict[str, Any]) -> dict[str, Any
     return _render_attachment(
         kind="background_tasks",
         title="Background Task State",
+        body="\n".join(lines),
+    )
+
+
+def _build_async_agent_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    tasks = get_async_agent_tasks(metadata)
+    activity = get_async_agent_state(metadata)
+    if not tasks and not activity:
+        return None
+
+    lines: list[str] = []
+    if tasks:
+        lines.append("Delegated agent tasks:")
+        for task in tasks:
+            agent_id = str(task.get("agent_id") or "").strip()
+            task_id = str(task.get("task_id") or "").strip()
+            status = str(task.get("status") or "unknown").strip()
+            description = str(task.get("description") or "").strip()
+            notified = "notified" if bool(task.get("notification_sent")) else "pending notification"
+            label = agent_id or task_id
+            lines.append(f"- {label} ({task_id}) [{status}, {notified}] {description}".strip())
+    if activity:
+        lines.append("Recent async-agent activity:")
+        lines.extend(f"- {item[:220]}" for item in activity[:5])
+
+    return _render_attachment(
+        kind="async_agents",
+        title="Delegated Agent State",
         body="\n".join(lines),
     )
 

@@ -10,6 +10,8 @@ Settings flow (mirrors OpenHarness's runtime.py):
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from pathlib import Path
 import sys
 
@@ -39,6 +41,7 @@ from miniharness.sessions import (
 )
 from miniharness.tasks.worker_protocol import decode_worker_line
 from miniharness.ui.runtime import RuntimeController
+from miniharness.swarm.spawn_utils import AGENT_HOOKS_ENV_VAR
 
 
 load_dotenv()
@@ -73,6 +76,8 @@ def main(
     tui: bool = typer.Option(False, "--tui", help="Launch the TUI frontend"),
     backend_only: bool = typer.Option(False, "--backend-only", help="Run in backend-only mode (for TUI to spawn)"),
     task_worker: bool = typer.Option(False, "--task-worker", help="Run as a background agent worker", hidden=True),
+    system_prompt: str | None = typer.Option(None, "--system-prompt", help="Replace runtime system prompt", hidden=True),
+    append_system_prompt: str | None = typer.Option(None, "--append-system-prompt", help="Append to runtime system prompt", hidden=True),
 ) -> None:
     """Run a MiniHarness prompt, or start interactive REPL if no prompt given."""
     root = Path(cwd).expanduser().resolve()
@@ -100,8 +105,16 @@ def main(
         asyncio.run(BackendHost(cwd=root, settings=settings).run())
         raise typer.Exit(0)
 
+    system_prompt_override = append_system_prompt or system_prompt
+    system_prompt_mode = "append" if append_system_prompt else ("replace" if system_prompt else None)
+
     if task_worker:
-        asyncio.run(_run_task_worker(root=root, settings=settings))
+        asyncio.run(_run_task_worker(
+            root=root,
+            settings=settings,
+            system_prompt_override=system_prompt_override,
+            system_prompt_mode=system_prompt_mode,
+        ))
         raise typer.Exit(0)
 
     if tui:
@@ -111,14 +124,37 @@ def main(
         raise typer.Exit(0)
 
     if continue_session:
-        asyncio.run(_run_repl(root=root, settings=settings, resume_session_id="latest"))
+        asyncio.run(_run_repl(
+            root=root,
+            settings=settings,
+            resume_session_id="latest",
+            system_prompt_override=system_prompt_override,
+            system_prompt_mode=system_prompt_mode,
+        ))
     elif resume is not None:
         session_id = _resolve_session_id(root, resume)
-        asyncio.run(_run_repl(root=root, settings=settings, resume_session_id=session_id))
+        asyncio.run(_run_repl(
+            root=root,
+            settings=settings,
+            resume_session_id=session_id,
+            system_prompt_override=system_prompt_override,
+            system_prompt_mode=system_prompt_mode,
+        ))
     elif prompt is None:
-        asyncio.run(_run_repl(root=root, settings=settings))
+        asyncio.run(_run_repl(
+            root=root,
+            settings=settings,
+            system_prompt_override=system_prompt_override,
+            system_prompt_mode=system_prompt_mode,
+        ))
     else:
-        asyncio.run(_run(prompt=prompt, root=root, settings=settings))
+        asyncio.run(_run(
+            prompt=prompt,
+            root=root,
+            settings=settings,
+            system_prompt_override=system_prompt_override,
+            system_prompt_mode=system_prompt_mode,
+        ))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -247,9 +283,22 @@ def _pick_session(root: Path) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
+async def _run(
+    *,
+    prompt: str,
+    root: Path,
+    settings: Settings,
+    system_prompt_override: str | None = None,
+    system_prompt_mode: str | None = None,
+) -> None:
     event_bus = _create_cli_event_bus()
-    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
+    runtime = RuntimeController(
+        cwd=root,
+        settings=settings,
+        event_bus=event_bus,
+        system_prompt_override=system_prompt_override,
+        system_prompt_mode=system_prompt_mode,
+    )
     try:
         await runtime.start()
         await runtime.handle_line(
@@ -262,10 +311,35 @@ async def _run(*, prompt: str, root: Path, settings: Settings) -> None:
         await runtime.close()
 
 
-async def _run_task_worker(*, root: Path, settings: Settings) -> None:
+def _load_task_worker_session_hooks() -> dict | None:
+    """Read session-scoped hooks provided by the parent agent process."""
+    raw = os.environ.get(AGENT_HOOKS_ENV_VAR)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _run_task_worker(
+    *,
+    root: Path,
+    settings: Settings,
+    system_prompt_override: str | None = None,
+    system_prompt_mode: str | None = None,
+) -> None:
     """Run a stdin-driven background worker for delegated agent tasks."""
     event_bus = _create_cli_event_bus()
-    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
+    runtime = RuntimeController(
+        cwd=root,
+        settings=settings,
+        event_bus=event_bus,
+        system_prompt_override=system_prompt_override,
+        system_prompt_mode=system_prompt_mode,
+        session_hooks=_load_task_worker_session_hooks(),
+    )
     try:
         await runtime.start()
         while True:
@@ -298,9 +372,17 @@ async def _run_repl(
     root: Path,
     settings: Settings,
     resume_session_id: str | None = None,
+    system_prompt_override: str | None = None,
+    system_prompt_mode: str | None = None,
 ) -> None:
     event_bus = _create_cli_event_bus()
-    runtime = RuntimeController(cwd=root, settings=settings, event_bus=event_bus)
+    runtime = RuntimeController(
+        cwd=root,
+        settings=settings,
+        event_bus=event_bus,
+        system_prompt_override=system_prompt_override,
+        system_prompt_mode=system_prompt_mode,
+    )
 
     console.print("[bold]MiniHarness[/bold] — interactive mode")
     console.print("Type [dim]/help[/dim] for commands, [dim]/exit[/dim] to quit.")

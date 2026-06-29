@@ -1,5 +1,5 @@
 """Integration test for the MiniHarness Hook system."""
-import asyncio, tempfile, os
+import asyncio, tempfile, os, json, shlex, sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +13,9 @@ from miniharness.hooks.executor import (
     _extract_matchable_subjects,
 )
 from miniharness.hooks.schemas import CommandHookDefinition
+from miniharness.permissions import PermissionChecker
+from miniharness.tasks import BackgroundTaskManager, reset_background_task_manager_for_tests
+from miniharness.tools.agent import AgentInput, AgentTool
 
 
 # ===================================================================
@@ -43,6 +46,67 @@ def test_registry():
     empty = load_hook_registry({"bad_event": [{"type": "command", "command": "x"}]})
     assert empty.total_count == 0
     print("2. Invalid event skipped: OK")
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_hook_fires_when_agent_task_completes(tmp_path: Path):
+    manager = reset_background_task_manager_for_tests(
+        BackgroundTaskManager(tasks_dir=tmp_path / "tasks")
+    )
+    hook_payload_path = tmp_path / "subagent-stop.json"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "import os, pathlib, sys; "
+            "pathlib.Path(sys.argv[1]).write_text("
+            "os.environ['MINIHARNESS_HOOK_PAYLOAD'], encoding='utf-8')"
+        )
+        + f" {shlex.quote(str(hook_payload_path))}"
+    )
+    registry = HookRegistry()
+    registry.register(
+        HookEvent.SUBAGENT_STOP,
+        CommandHookDefinition(command=command, matcher="subagent_stop"),
+    )
+    hook_executor = HookExecutor(
+        registry,
+        HookExecutionContext(cwd=tmp_path),
+    )
+    tool = AgentTool(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+        hook_executor=hook_executor,
+    )
+
+    result = await tool.execute(AgentInput(
+        description="quick worker",
+        prompt="finish quickly",
+        subagent_type="reviewer",
+        command=f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote("import sys; sys.stdin.readline(); print('done')"),
+    ))
+
+    assert result.is_error is False
+    assert result.metadata is not None
+    task_id = result.metadata["task_id"]
+    for _ in range(80):
+        task = manager.get_task(task_id)
+        if task is not None and task.status in {"completed", "failed", "killed"}:
+            if hook_payload_path.exists():
+                break
+        await asyncio.sleep(0.05)
+
+    assert hook_payload_path.exists()
+    payload = json.loads(hook_payload_path.read_text(encoding="utf-8"))
+    assert payload["event"] == "subagent_stop"
+    assert payload["task_id"] == task_id
+    assert payload["agent_id"] == result.metadata["agent_id"]
+    assert payload["backend_type"] == result.metadata["backend_type"]
+    assert payload["status"] == "completed"
+    assert payload["return_code"] == 0
+    assert payload["description"] == "quick worker"
+    assert payload["subagent_type"] == "reviewer"
+    assert payload["team"] == "default"
 
 
 # ===================================================================

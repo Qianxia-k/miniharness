@@ -62,6 +62,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /resume [id]        Resume a saved session")
     lines.append("  /tag <name>         Tag current session")
     lines.append("  /hooks              Show active hook configuration")
+    lines.append("  /agents [name]      List or inspect delegated agent definitions")
     lines.append("  /skills             List available skills (source + status)")
     lines.append("  /plugins [name]     List/inspect/toggle plugins (on|off)")
     lines.append("  /tools              List, describe, or execute tools")
@@ -98,6 +99,50 @@ def cmd_tasks(args: str, ctx: CommandContext) -> CommandResult:
     if manager is None:
         return CommandResult.ok("Task manager is not available.")
     return CommandResult.ok(format_task_list(manager.list_tasks()))
+
+
+def cmd_agents(args: str, ctx: CommandContext) -> CommandResult:
+    """List or inspect delegated agent definitions."""
+    from miniharness.coordinator.agent_definitions import (
+        get_agent_definition,
+        get_all_agent_definitions,
+    )
+
+    name = args.strip()
+    if name:
+        agent = get_agent_definition(name, cwd=ctx.cwd)
+        if agent is None:
+            return CommandResult.ok(f"Agent definition '{name}' not found.")
+        lines = [
+            f"**Agent: {agent.name}**",
+            f"  description: {agent.description}",
+            f"  source: {agent.source}",
+            f"  model: {agent.model or 'default'}",
+            f"  system_prompt_mode: {agent.system_prompt_mode}",
+            f"  permission_mode: {agent.permission_mode or '(not enforced yet)'}",
+            f"  disallowed_tools: {', '.join(agent.disallowed_tools) if agent.disallowed_tools else '(none)'}",
+        ]
+        if agent.path:
+            lines.append(f"  path: {agent.path}")
+        if agent.system_prompt:
+            preview = agent.system_prompt.strip().replace("\n", " ")
+            lines.append("")
+            lines.append(f"  prompt: {preview[:300]}")
+        return CommandResult.ok("\n".join(lines))
+
+    agents = get_all_agent_definitions(cwd=ctx.cwd)
+    if not agents:
+        return CommandResult.ok("No agent definitions available.")
+
+    lines = [f"**Agent Definitions** ({len(agents)} total)", ""]
+    for agent in agents:
+        model = f" model={agent.model}" if agent.model else ""
+        lines.append(f"  {agent.name:<20} [{agent.source}]{model}")
+        lines.append(f"    {agent.description[:90]}")
+    lines.append("")
+    lines.append("Add project agents in .miniharness/agents/<name>.md")
+    lines.append("Use /agents <name> to inspect one definition.")
+    return CommandResult.ok("\n".join(lines))
 
 
 def cmd_tokens(args: str, ctx: CommandContext) -> CommandResult:

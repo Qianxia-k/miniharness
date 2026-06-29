@@ -45,3 +45,7 @@ class PluginManifest(BaseModel):
         default="mcp.json",
         description="JSON file with MCP server definitions",
     )
+    agents: str | list | None = Field(
+        default=None,
+        description="Optional agent definition paths; defaults to agents/ directory",
+    )

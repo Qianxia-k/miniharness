@@ -25,6 +25,8 @@ class LoadedPlugin:
         AgentLoop's plugin index.
     skills:
         Skill definitions loaded from the skills subdirectory.
+    agents:
+        Agent definitions loaded from the agents subdirectory.
     hooks:
         Hook definitions keyed by event name.
     mcp_servers:
@@ -35,6 +37,7 @@ class LoadedPlugin:
     path: Path
     enabled: bool = True
     skills: list[Any] = field(default_factory=list)     # list[SkillDefinition]
+    agents: list[Any] = field(default_factory=list)     # list[AgentDefinition]
     hooks: dict[str, list[dict]] = field(default_factory=dict)
     mcp_servers: dict[str, Any] = field(default_factory=dict)
 

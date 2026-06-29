@@ -119,7 +119,7 @@ def _parse_yaml_safe(text: str) -> dict[str, Any]:
     try:
         import yaml
         result = yaml.safe_load(text)
-        return result if isinstance(result, dict) else {}
+        return _normalize_yaml_keys(result) if isinstance(result, dict) else {}
     except Exception:
         pass
 
@@ -150,6 +150,19 @@ def _parse_yaml_safe(text: str) -> dict[str, Any]:
                 result[key] = val
         i += 1
     return result
+
+
+def _normalize_yaml_keys(value: Any) -> Any:
+    """Normalize YAML mapping keys while preserving parsed YAML value types."""
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).strip().replace("-", "_")
+            normalized[normalized_key] = _normalize_yaml_keys(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_yaml_keys(item) for item in value]
+    return value
 
 
 def _fold_yaml_block(lines: list[str], *, literal: bool) -> str:

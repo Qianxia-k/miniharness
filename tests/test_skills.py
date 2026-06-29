@@ -40,7 +40,7 @@ def test_parse_with_yaml():
     assert "Perform thorough reviews" in meta["body"]
     fm = meta["frontmatter"]
     assert fm.get("name") == "code-review"
-    assert fm.get("disable_model_invocation") == "true"  # hyphens → underscores in fallback parser
+    assert fm.get("disable_model_invocation") is True
     print("2. Parse with YAML: OK")
 
 

@@ -5,7 +5,20 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
+
+
+BackendType = Literal["subprocess", "in_process", "tmux", "iterm2", "remote"]
+
+
+@dataclass(frozen=True)
+class BackendStatus:
+    """Availability information for one teammate backend."""
+
+    backend_type: str
+    available: bool
+    active: bool = False
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -19,6 +32,11 @@ class TeammateSpawnConfig:
     cwd: str | Path
     model: str | None = None
     command: str | None = None
+    system_prompt: str | None = None
+    system_prompt_mode: str | None = None
+    hooks: dict | None = None
+    permissions: list[str] | None = None
+    metadata: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -45,10 +63,26 @@ class TeammateMessage:
             object.__setattr__(self, "timestamp", time.time())
 
 
+@dataclass(frozen=True)
+class TeammateStatus:
+    """Runtime status for one delegated agent."""
+
+    agent_id: str
+    task_id: str
+    status: str
+    backend_type: str
+    description: str
+    status_note: str = ""
+
+
 class TeammateExecutor(Protocol):
     """Backend interface for delegated agents."""
 
     backend_type: str
+
+    def is_available(self) -> bool:
+        """Return whether this backend can run in the current process."""
+        ...
 
     async def spawn(self, config: TeammateSpawnConfig) -> SpawnResult:
         """Spawn a delegated agent."""
@@ -64,4 +98,8 @@ class TeammateExecutor(Protocol):
 
     def get_task_id(self, agent_id: str) -> str | None:
         """Return the backing background task id for an agent id."""
+        ...
+
+    def list_agents(self, *, team: str | None = None) -> list[TeammateStatus]:
+        """Return delegated agents known to this backend."""
         ...

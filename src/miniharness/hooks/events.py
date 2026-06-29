@@ -69,6 +69,14 @@ class HookEvent(str, Enum):
     pattern analysis.
     """
 
+    SUBAGENT_STOP = "subagent_stop"
+    """Fires when a delegated subagent task reaches a terminal state.
+
+    Payload: ``{"agent_id": "...", "task_id": "...", "backend_type": "...",
+    "status": "completed"|"failed"|"killed", "return_code": int|None,
+    "description": "...", "subagent_type": "...", "team": "..."}``
+    """
+
     # ── Compaction ──────────────────────────────────────────────────
     PRE_COMPACT = "pre_compact"
     """Fires BEFORE conversation compaction runs.

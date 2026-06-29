@@ -67,4 +67,36 @@ def test_disabled_plugin_does_not_contribute_capabilities(tmp_path: Path, monkey
     assert len(plugins) == 1
     assert plugins[0].enabled is False
     assert plugins[0].skills == []
+    assert plugins[0].agents == []
     assert plugins[0].mcp_servers == {}
+
+
+def test_plugin_agents_are_loaded_and_namespaced(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    user_plugins = home / ".miniharness" / "plugins"
+    plugin_dir = _write_plugin(user_plugins, "review-pack")
+    agents_dir = plugin_dir / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "reviewer.md").write_text(
+        """---
+name: reviewer
+description: Plugin reviewer agent.
+model: inherit
+---
+
+Review code using plugin rules.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    plugins = load_plugins(Settings(), cwd=tmp_path)
+
+    assert len(plugins) == 1
+    assert len(plugins[0].agents) == 1
+    agent = plugins[0].agents[0]
+    assert agent.name == "review-pack:reviewer"
+    assert agent.subagent_type == "review-pack:reviewer"
+    assert agent.source == "plugin"
+    assert agent.description == "Plugin reviewer agent."
+    assert "plugin rules" in agent.system_prompt

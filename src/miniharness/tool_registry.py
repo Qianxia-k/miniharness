@@ -168,6 +168,7 @@ def create_default_registry(
     plugin_index: list[dict] | None = None,
     permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
     task_manager=None,
+    hook_executor=None,
 ) -> ToolRegistry:
     """Create a ToolRegistry with all built-in tools + MCP adapters.
 
@@ -198,7 +199,12 @@ def create_default_registry(
     # External & meta
     registry.register(WebFetchTool(cwd=cwd, permissions=permissions))
     registry.register(TaskTool(cwd=cwd, permissions=permissions, manager=task_manager))
-    registry.register(AgentTool(cwd=cwd, permissions=permissions))
+    registry.register(AgentTool(
+        cwd=cwd,
+        permissions=permissions,
+        plugin_index=plugin_index,
+        hook_executor=hook_executor,
+    ))
     registry.register(AgentListTool(cwd=cwd, permissions=permissions))
     registry.register(SendMessageTool(cwd=cwd, permissions=permissions))
     registry.register(TeamCreateTool(cwd=cwd, permissions=permissions))

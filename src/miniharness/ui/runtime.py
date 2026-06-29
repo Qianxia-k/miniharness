@@ -12,11 +12,12 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
     cmd_clear,
+    cmd_agents,
     cmd_exit,
     cmd_help,
     cmd_history,
@@ -39,6 +40,7 @@ from miniharness.commands.builtin import (
 from miniharness.commands.types import CommandResult
 from miniharness.config.settings import Settings
 from miniharness.loop import AgentLoop
+from miniharness.messages import Message
 from miniharness.runtime import RuntimeEventBus
 from miniharness.sessions import (
     list_sessions,
@@ -66,6 +68,9 @@ class RuntimeController:
     permission_prompt: PermissionPrompt | None = None
     compact_progress: CompactProgressHandler | None = None
     event_bus: RuntimeEventBus | None = None
+    system_prompt_override: str | None = None
+    system_prompt_mode: str | None = None
+    session_hooks: dict[str, Any] | None = None
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
@@ -79,6 +84,9 @@ class RuntimeController:
             permission_prompt=self.permission_prompt,
             compact_progress=self.compact_progress,
             event_bus=self.event_bus,
+            system_prompt_override=self.system_prompt_override,
+            system_prompt_mode=self.system_prompt_mode,
+            session_hooks=self.session_hooks,
         )
         self.loop.session_id = uuid.uuid4().hex[:12]
         self.commands = self._build_command_registry()
@@ -169,14 +177,20 @@ class RuntimeController:
                 await self._replace_loop(new_loop)
                 return True
 
-            if result.should_save and not result.exit:
+            notification = await self._drain_coordinator_notifications(
+                run_agent=run_agent,
+                print_system=print_system,
+            )
+            if (result.should_save or notification) and not result.exit:
                 save_loop_snapshot(self.loop)
-            await self._notify_completed_background_tasks(print_system)
             return not result.exit
 
         await run_agent(self.loop, stripped)
+        await self._drain_coordinator_notifications(
+            run_agent=run_agent,
+            print_system=print_system,
+        )
         save_loop_snapshot(self.loop)
-        await self._notify_completed_background_tasks(print_system)
         self._schedule_memory_extraction(print_system)
         return True
 
@@ -241,17 +255,72 @@ class RuntimeController:
         if message:
             await print_system(message)
 
-    async def _notify_completed_background_tasks(self, print_system: SystemPrinter) -> None:
-        """Surface completed background tasks remembered by this session."""
+    async def _drain_coordinator_notifications(
+        self,
+        *,
+        run_agent: AgentRunner,
+        print_system: SystemPrinter,
+    ) -> str:
+        """Drain completed task notifications and auto-submit agent results.
+
+        OpenHarness feeds completed async-agent results back to the coordinator
+        as user-role ``<task-notification>`` messages.  MiniHarness follows the
+        same contract by submitting agent notifications through the same
+        ``run_agent`` adapter that CLI/TUI/Web use for normal user prompts.
+
+        Generic shell task notifications are displayed and persisted, but are
+        not automatically submitted as coordinator turns.
+        """
+        payloads: list[str] = []
+
+        first_message = await self._notify_completed_background_tasks(print_system)
+        if first_message:
+            payloads.append(first_message)
+            if "<task-notification>" in first_message:
+                await print_system("Submitting background agent result to coordinator...")
+                await run_agent(self.loop, first_message)
+            else:
+                self.loop.conversation.append(Message(role="user", content=first_message))
+
+        try:
+            from miniharness.ui.coordinator_drain import (
+                format_completed_background_task_notifications,
+                pending_async_agent_entries,
+                wait_for_completed_async_agent_entries,
+            )
+        except Exception:
+            return "\n\n".join(payloads)
+
+        while pending_async_agent_entries(self.loop.tool_metadata):
+            pending = pending_async_agent_entries(self.loop.tool_metadata)
+            await print_system(
+                f"Waiting for {len(pending)} background agent task(s) to finish..."
+            )
+            completed = await wait_for_completed_async_agent_entries(
+                self.loop.tool_metadata,
+            )
+            message = format_completed_background_task_notifications(completed)
+            if not message.strip():
+                return "\n\n".join(payloads)
+            payloads.append(message)
+            await print_system(message)
+            await print_system("Submitting background agent result to coordinator...")
+            await run_agent(self.loop, message)
+
+        return "\n\n".join(payloads)
+
+    async def _notify_completed_background_tasks(self, print_system: SystemPrinter) -> str:
+        """Return completed background task notifications, if any."""
         try:
             from miniharness.ui.coordinator_drain import drain_completed_background_tasks
 
-            await drain_completed_background_tasks(
+            message = await drain_completed_background_tasks(
                 self.loop.tool_metadata,
                 print_system=print_system,
             )
+            return message
         except Exception:
-            return
+            return ""
 
     async def _replace_loop(self, new_loop: AgentLoop) -> None:
         old_mcp = getattr(self.loop, "_mcp_manager", None)
@@ -282,6 +351,7 @@ class RuntimeController:
         reg.register("help", cmd_help, description="Show available commands", source="builtin")
         reg.register("history", cmd_history, description="Show message count", source="builtin")
         reg.register("tasks", cmd_tasks, description="Show current task list", source="builtin")
+        reg.register("agents", cmd_agents, description="List or inspect delegated agent definitions", source="builtin")
         reg.register("tokens", cmd_tokens, description="Show current context token budget", source="builtin")
         reg.register("model", cmd_model, description="Show or switch the model", source="builtin")
         reg.register("turns", cmd_turns, description="Show or set max turns", source="builtin")

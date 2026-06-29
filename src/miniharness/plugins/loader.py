@@ -144,6 +144,7 @@ def _load_one(path: Path, enabled_map: dict[str, bool]) -> LoadedPlugin | None:
         )
 
     skills = _load_plugin_skills(path / manifest.skills_dir, plugin_name=manifest.name)
+    agents = _load_plugin_agents(path, manifest)
     hooks = _load_plugin_hooks(path / manifest.hooks_file)
     mcp_servers = _load_plugin_mcp(path / manifest.mcp_file)
 
@@ -152,6 +153,7 @@ def _load_one(path: Path, enabled_map: dict[str, bool]) -> LoadedPlugin | None:
         path=path,
         enabled=enabled,
         skills=skills,
+        agents=agents,
         hooks=hooks,
         mcp_servers=mcp_servers,
     )
@@ -224,6 +226,62 @@ def _load_plugin_skills(skills_dir: Path, *, plugin_name: str) -> list[Any]:
     return skills
 
 
+def _load_plugin_agents(plugin_dir: Path, manifest: PluginManifest) -> list[Any]:
+    """Load agent definitions contributed by a plugin."""
+    from miniharness.coordinator.agent_definitions import load_agents_dir
+
+    agents: list[Any] = []
+    seen: set[Path] = set()
+
+    default_dir = plugin_dir / "agents"
+    for agent in load_agents_dir(default_dir, source="plugin"):
+        agents.append(_namespace_plugin_agent(agent, plugin_name=manifest.name))
+        if agent.path:
+            seen.add(Path(agent.path).resolve())
+
+    for raw_path in _coerce_path_list(manifest.agents):
+        agent_path = (plugin_dir / raw_path).resolve()
+        if agent_path.is_dir():
+            for agent in load_agents_dir(agent_path, source="plugin"):
+                if agent.path and Path(agent.path).resolve() in seen:
+                    continue
+                agents.append(_namespace_plugin_agent(agent, plugin_name=manifest.name))
+                if agent.path:
+                    seen.add(Path(agent.path).resolve())
+        elif agent_path.is_file() and agent_path.suffix.lower() == ".md":
+            loaded = load_agents_dir(agent_path.parent, source="plugin")
+            for agent in loaded:
+                if agent.path and Path(agent.path).resolve() != agent_path:
+                    continue
+                if agent.path and Path(agent.path).resolve() in seen:
+                    continue
+                agents.append(_namespace_plugin_agent(agent, plugin_name=manifest.name))
+                if agent.path:
+                    seen.add(Path(agent.path).resolve())
+
+    return agents
+
+
+def _namespace_plugin_agent(agent, *, plugin_name: str):
+    """Return a plugin-scoped AgentDefinition to avoid global name collisions."""
+    from dataclasses import replace
+
+    raw_name = agent.name
+    namespaced = raw_name if raw_name.startswith(f"{plugin_name}:") else f"{plugin_name}:{raw_name}"
+    raw_subagent_type = agent.subagent_type or raw_name
+    namespaced_subagent_type = (
+        raw_subagent_type
+        if raw_subagent_type.startswith(f"{plugin_name}:")
+        else f"{plugin_name}:{raw_subagent_type}"
+    )
+    return replace(
+        agent,
+        name=namespaced,
+        subagent_type=namespaced_subagent_type,
+        source="plugin",
+    )
+
+
 def _load_plugin_hooks(hooks_path: Path) -> dict[str, list[dict]]:
     """Load hook definitions from a plugin's hooks.json."""
     if not hooks_path.is_file():
@@ -260,6 +318,17 @@ def _load_plugin_mcp(mcp_path: Path) -> dict[str, Any]:
 
     servers = raw.get("mcpServers", raw)
     return servers if isinstance(servers, dict) else {}
+
+
+def _coerce_path_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
 
 
 # ---------------------------------------------------------------------------

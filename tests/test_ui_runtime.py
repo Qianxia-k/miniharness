@@ -69,6 +69,34 @@ async def test_runtime_tokens_command_reports_budget_without_agent_call(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_runtime_agents_command_lists_agent_definitions(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/agents verification",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("Agent: verification" in msg for msg in system_messages)
+    assert any("VERDICT:" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
 async def test_runtime_prompt_calls_agent_and_saves_session(tmp_path: Path):
     runtime = RuntimeController(cwd=tmp_path, settings=Settings())
     prompts: list[str] = []

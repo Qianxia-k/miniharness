@@ -19,6 +19,12 @@ from miniharness.tasks import (
 from miniharness.tasks.background import _default_agent_argv
 from miniharness.tasks.worker_protocol import decode_worker_line, encode_worker_message
 from miniharness.tool_registry import create_default_registry
+from miniharness.swarm.registry import BackendRegistry
+from miniharness.swarm.spawn_utils import (
+    build_inherited_env_vars,
+    build_teammate_argv,
+)
+from miniharness.swarm.types import SpawnResult, TeammateMessage, TeammateSpawnConfig, TeammateStatus
 
 
 async def _wait_for_status(manager: BackgroundTaskManager, task_id: str, *statuses: str):
@@ -93,6 +99,33 @@ async def test_background_task_manager_runs_local_agent_command_override(tmp_pat
     assert restored.prompt == "summarize this"
 
 
+@pytest.mark.asyncio
+async def test_background_task_env_is_forwarded_but_not_persisted(tmp_path: Path):
+    tasks_dir = tmp_path / "tasks"
+    manager = BackgroundTaskManager(tasks_dir=tasks_dir)
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote("import os, sys; sys.stdin.read(); print(os.environ.get('MINIHARNESS_TEST_SECRET', 'missing'))")
+    )
+
+    task = await manager.create_agent_task(
+        prompt="check env",
+        description="env smoke",
+        cwd=tmp_path,
+        command=command,
+        extra_env={"MINIHARNESS_TEST_SECRET": "super-secret-value"},
+    )
+    await _wait_for_status(manager, task.id, "completed")
+
+    index_text = (tasks_dir / "tasks.json").read_text(encoding="utf-8")
+    restored = BackgroundTaskManager(tasks_dir=tasks_dir).get_task(task.id)
+
+    assert "super-secret-value" in manager.read_output(task.id)
+    assert "super-secret-value" not in index_text
+    assert restored is not None
+    assert restored.env is None
+
+
 def test_default_agent_argv_uses_task_worker_mode(tmp_path: Path):
     argv = _default_agent_argv(cwd=tmp_path, model="test-model")
 
@@ -102,6 +135,100 @@ def test_default_agent_argv_uses_task_worker_mode(tmp_path: Path):
     assert "--task-worker" in argv
     assert "--model" in argv
     assert "test-model" in argv
+
+
+def test_spawn_utils_supports_teammate_command_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MINIHARNESS_TEAMMATE_COMMAND", "/usr/local/bin/mh")
+
+    argv = build_teammate_argv(cwd=tmp_path, model="worker-model")
+
+    assert argv[:4] == [
+        "/usr/local/bin/mh",
+        "--cwd",
+        str(tmp_path.resolve()),
+        "--task-worker",
+    ]
+    assert argv[-2:] == ["--model", "worker-model"]
+
+
+def test_spawn_utils_forward_only_whitelisted_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("MINIHARNESS_MODEL", "test-model")
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+
+    env = build_inherited_env_vars()
+
+    assert env["MINIHARNESS_AGENT_TEAMS"] == "1"
+    assert env["OPENAI_API_KEY"] == "test-key"
+    assert env["MINIHARNESS_MODEL"] == "test-model"
+    assert "UNRELATED_SECRET" not in env
+
+
+def test_backend_registry_auto_selects_subprocess():
+    registry = BackendRegistry()
+
+    assert registry.resolve_backend_type() == "subprocess"
+    assert registry.get_executor().backend_type == "subprocess"
+
+    statuses = registry.list_backends()
+    assert len(statuses) == 1
+    assert statuses[0].backend_type == "subprocess"
+    assert statuses[0].available is True
+    assert statuses[0].active is True
+
+
+def test_backend_registry_honors_environment_preference(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MINIHARNESS_TEAMMATE_MODE", "subprocess")
+
+    registry = BackendRegistry()
+
+    assert registry.resolve_backend_type() == "subprocess"
+
+
+def test_backend_registry_rejects_unknown_backend():
+    registry = BackendRegistry()
+
+    with pytest.raises(ValueError, match="Unknown teammate backend: tmux"):
+        registry.get_executor("tmux")
+
+
+def test_backend_registry_rejects_unavailable_explicit_backend():
+    class UnavailableBackend:
+        backend_type = "offline"
+
+        def is_available(self) -> bool:
+            return False
+
+        async def spawn(self, config: TeammateSpawnConfig) -> SpawnResult:
+            del config
+            raise AssertionError("unavailable backend should not spawn")
+
+        async def send_message(self, agent_id: str, message: TeammateMessage) -> None:
+            del agent_id, message
+            raise AssertionError("unavailable backend should not send")
+
+        async def shutdown(self, agent_id: str, *, force: bool = False) -> bool:
+            del agent_id, force
+            return False
+
+        def get_task_id(self, agent_id: str) -> str | None:
+            del agent_id
+            return None
+
+        def list_agents(self, *, team: str | None = None) -> list[TeammateStatus]:
+            del team
+            return []
+
+    registry = BackendRegistry()
+    registry.register(UnavailableBackend())
+
+    with pytest.raises(ValueError, match="not available: offline"):
+        registry.get_executor("offline")
+
+    health = registry.health_check()
+    assert health["total_count"] == 1
+    assert health["backends"]["offline"]["available"] is False
+    assert health["backends"]["subprocess"]["active"] is True
 
 
 def test_worker_protocol_keeps_single_line_plain_and_frames_multiline():
@@ -825,20 +952,47 @@ def test_agent_carryover_survives_compaction_attachment():
         is_error=False,
     )
 
-    state = metadata["background_task_state"]
-    assert state[0]["id"] == "bg-abc12345"
+    state = metadata["async_agent_tasks"]
+    assert state[0]["task_id"] == "bg-abc12345"
     assert state[0]["agent_id"] == "reviewer@default"
-    assert state[0]["type"] == "local_agent"
-    assert state[0]["subagent_type"] == "reviewer"
+    assert state[0]["status"] == "spawned"
+    assert state[0]["notification_sent"] is False
 
     attachments = build_compact_attachments(metadata)
-    background = [
+    async_agents = [
         item for item in attachments
-        if "[Compact attachment: background_tasks]" in item["content"]
+        if "[Compact attachment: async_agents]" in item["content"]
     ]
-    assert background
-    assert "reviewer@default (bg-abc12345)" in background[0]["content"]
-    assert "review file changes" in background[0]["content"]
+    assert async_agents
+    assert "reviewer@default (bg-abc12345)" in async_agents[0]["content"]
+    assert "review file changes" in async_agents[0]["content"]
+
+
+def test_agent_carryover_prefers_structured_result_metadata():
+    metadata: dict = {}
+
+    record_tool_carryover(
+        metadata,
+        tool_name="agent",
+        arguments={
+            "description": "review file changes",
+            "prompt": "inspect current diff",
+            "subagent_type": "reviewer",
+        },
+        result_output="Spawned delegated reviewer.",
+        result_metadata={
+            "agent_id": "reviewer@default",
+            "task_id": "bg-meta1234",
+            "backend_type": "local_agent",
+            "description": "review file changes",
+        },
+        is_error=False,
+    )
+
+    state = metadata["async_agent_tasks"]
+    assert state[0]["task_id"] == "bg-meta1234"
+    assert state[0]["agent_id"] == "reviewer@default"
+    assert state[0]["description"] == "review file changes"
 
 
 def test_send_message_carryover_survives_compaction_attachment():
@@ -852,14 +1006,13 @@ def test_send_message_carryover_survives_compaction_attachment():
         is_error=False,
     )
 
-    state = metadata["background_task_state"]
-    assert state[0]["id"] == "bg-abc12345"
-    assert state[0]["last_message_preview"] == "please inspect tests"
+    state = metadata["async_agent_state"]
+    assert "Sent follow-up message to async agent agent-abc12345" in state[0]
 
     attachments = build_compact_attachments(metadata)
-    background = [
+    async_agents = [
         item for item in attachments
-        if "[Compact attachment: background_tasks]" in item["content"]
+        if "[Compact attachment: async_agents]" in item["content"]
     ]
-    assert background
-    assert "last message: please inspect tests" in background[0]["content"]
+    assert async_agents
+    assert "Sent follow-up message to async agent agent-abc12345" in async_agents[0]["content"]
