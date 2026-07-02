@@ -19,7 +19,16 @@ from miniharness.tasks import (
 from miniharness.tasks.background import BackgroundTaskRecord
 from miniharness.tool_registry import create_default_registry
 from miniharness.prompts.system import assemble_system_prompt
-from miniharness.swarm.spawn_utils import AGENT_HOOKS_ENV_VAR
+from miniharness.swarm.spawn_utils import (
+    AGENT_HOOKS_ENV_VAR,
+    AGENT_ID_ENV_VAR,
+    AGENT_MAX_TURNS_ENV_VAR,
+    AGENT_NAME_ENV_VAR,
+    AGENT_PERMISSION_MODE_ENV_VAR,
+    AGENT_TEAM_ENV_VAR,
+    AGENT_TOOL_POLICY_ENV_VAR,
+)
+from miniharness.ui.runtime import RuntimeController
 
 
 def test_load_agents_dir_reads_frontmatter_and_body(tmp_path: Path):
@@ -32,6 +41,8 @@ description: Reviews code changes carefully.
 model: inherit
 disallowed_tools: write_file, edit_file
 permission_mode: plan
+maxTurns: 3
+initialPrompt: Always inspect the diff before answering.
 hooks:
   subagent_stop:
     - type: command
@@ -52,6 +63,8 @@ You are a careful reviewer. Inspect diffs and report risks.
     assert agent.model == "inherit"
     assert agent.disallowed_tools == ["write_file", "edit_file"]
     assert agent.permission_mode == "plan"
+    assert agent.max_turns == 3
+    assert agent.initial_prompt == "Always inspect the diff before answering."
     assert agent.hooks == {
         "subagent_stop": [{"type": "command", "command": "printf stopped"}]
     }
@@ -173,6 +186,9 @@ name: reviewer
 description: Project reviewer.
 model: inherit
 permission_mode: plan
+disallowed_tools: write_file, edit_file
+maxTurns: 2
+initialPrompt: Start with a read-only review checklist.
 ---
 
 Review code and return only findings with file references.
@@ -227,7 +243,16 @@ Review code and return only findings with file references.
     assert "Review code and return only findings" in argv[argv.index("--append-system-prompt") + 1]
     extra_env = captured["extra_env"]
     assert isinstance(extra_env, dict)
+    assert extra_env[AGENT_ID_ENV_VAR] == "reviewer@default"
+    assert extra_env[AGENT_NAME_ENV_VAR] == "reviewer"
+    assert extra_env[AGENT_TEAM_ENV_VAR] == "default"
     assert AGENT_HOOKS_ENV_VAR not in extra_env
+    assert extra_env[AGENT_MAX_TURNS_ENV_VAR] == "2"
+    assert extra_env[AGENT_PERMISSION_MODE_ENV_VAR] == "plan"
+    assert AGENT_TOOL_POLICY_ENV_VAR in extra_env
+    assert "write_file" in extra_env[AGENT_TOOL_POLICY_ENV_VAR]
+    assert "edit_file" in extra_env[AGENT_TOOL_POLICY_ENV_VAR]
+    assert captured["prompt"].startswith("Start with a read-only review checklist.\n\nPlease review.")
     task = manager.get_task("bg-agentdef")
     assert task is not None
     assert task.metadata["agent_definition"] == "reviewer"
@@ -302,6 +327,82 @@ Review code and report findings.
     assert AGENT_HOOKS_ENV_VAR in extra_env
     assert "subagent_stop" in extra_env[AGENT_HOOKS_ENV_VAR]
     assert "printf '$TASK_ID'" in extra_env[AGENT_HOOKS_ENV_VAR]
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_policy_hides_and_blocks_disallowed_tools(tmp_path: Path):
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(),
+        tool_policy={"disallowed_tools": ["write_file", "edit_file", "agent"]},
+    )
+
+    tool_names = {
+        tool["function"]["name"]
+        for tool in runtime.loop.tools.to_openai_tools()
+    }
+
+    assert "read_file" in tool_names
+    assert "write_file" not in tool_names
+    assert "edit_file" not in tool_names
+    assert "agent" not in tool_names
+
+    result = await runtime.loop.tools.execute("write_file", {
+        "path": "blocked.txt",
+        "content": "nope",
+    })
+
+    assert result.is_error is True
+    assert "not active" in result.output
+    assert not (tmp_path / "blocked.txt").exists()
+
+
+def test_agent_tool_policy_allowlist_supports_patterns(tmp_path: Path):
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(),
+        tool_policy={"tools": ["read_*", "ls"]},
+    )
+
+    tool_names = {
+        tool["function"]["name"]
+        for tool in runtime.loop.tools.to_openai_tools()
+    }
+
+    assert "read_file" in tool_names
+    assert "ls" in tool_names
+    assert "grep" not in tool_names
+    assert "bash" not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_agent_permission_mode_is_enforced_by_worker_runtime(tmp_path: Path):
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(),
+        permission_mode="plan",
+    )
+
+    assert runtime.loop.permissions.mode == "plan"
+    result = await runtime.loop.tools.execute("write_file", {
+        "path": "blocked-by-plan.txt",
+        "content": "nope",
+    })
+
+    assert result.is_error is True
+    assert "Read-only mode" in result.output
+    assert not (tmp_path / "blocked-by-plan.txt").exists()
+
+
+def test_agent_max_turns_overrides_worker_runtime_limit(tmp_path: Path):
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(max_turns=8),
+        max_turns=2,
+    )
+
+    assert runtime.loop.max_turns == 2
+    assert runtime.loop.settings.max_turns == 8
 
 
 @pytest.mark.asyncio

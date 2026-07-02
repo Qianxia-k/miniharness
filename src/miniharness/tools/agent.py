@@ -90,6 +90,8 @@ class AgentTool(BaseTool):
         model = arguments.model
         if model is None and agent_def is not None:
             model = agent_def.model
+        if agent_def is not None and agent_def.initial_prompt:
+            prompt = f"{agent_def.initial_prompt.strip()}\n\n{prompt}"
         metadata = {}
         if agent_def is not None:
             metadata = {
@@ -117,6 +119,10 @@ class AgentTool(BaseTool):
                 system_prompt_mode=(
                     agent_def.system_prompt_mode if agent_def is not None else None
                 ),
+                max_turns=agent_def.max_turns if agent_def is not None else None,
+                tools=agent_def.tools if agent_def is not None else None,
+                disallowed_tools=agent_def.disallowed_tools if agent_def is not None else None,
+                permission_mode=agent_def.permission_mode if agent_def is not None else None,
                 hooks=agent_def.hooks if agent_def is not None else None,
                 metadata=metadata,
             )

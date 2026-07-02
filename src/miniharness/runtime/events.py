@@ -43,6 +43,8 @@ class ToolCompletedEvent:
     tool_name: str = ""
     output: str = ""
     is_error: bool = False
+    artifact_path: str = ""
+    original_output_chars: int = 0
 
 
 @dataclass(frozen=True)

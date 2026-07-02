@@ -18,6 +18,10 @@ from miniharness.swarm.spawn_utils import (
     build_inherited_env_vars,
     build_teammate_argv,
     encode_agent_hooks_env,
+    encode_agent_identity_env,
+    encode_agent_max_turns_env,
+    encode_agent_permission_mode_env,
+    encode_agent_tool_policy_env,
 )
 
 
@@ -48,7 +52,18 @@ class SubprocessBackend:
             system_prompt_mode=config.system_prompt_mode,
         )
         extra_env = build_inherited_env_vars()
+        extra_env.update(encode_agent_identity_env(
+            agent_id=agent_id,
+            agent_name=agent_name,
+            team=team,
+        ))
         extra_env.update(encode_agent_hooks_env(config.hooks))
+        extra_env.update(encode_agent_max_turns_env(config.max_turns))
+        extra_env.update(encode_agent_permission_mode_env(config.permission_mode))
+        extra_env.update(encode_agent_tool_policy_env(
+            tools=config.tools,
+            disallowed_tools=config.disallowed_tools,
+        ))
         try:
             task = await manager.create_agent_task(
                 prompt=config.prompt,

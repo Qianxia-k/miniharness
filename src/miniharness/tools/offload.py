@@ -17,6 +17,7 @@ Mirrors OpenHarness's ``_offload_tool_output_if_needed()``.
 from __future__ import annotations
 
 import re
+import os
 import time
 import uuid
 from pathlib import Path
@@ -28,12 +29,20 @@ DEFAULT_PREVIEW_CHARS = 2_000        # how much to keep inline
 
 def tool_output_inline_chars() -> int:
     """Maximum characters before offloading kicks in."""
-    return DEFAULT_INLINE_CHAR_LIMIT
+    return _read_positive_int_env(
+        "MINIHARNESS_TOOL_OUTPUT_INLINE_CHARS",
+        DEFAULT_INLINE_CHAR_LIMIT,
+        minimum=256,
+    )
 
 
 def tool_output_preview_chars() -> int:
     """Characters to include as inline preview after offloading."""
-    return DEFAULT_PREVIEW_CHARS
+    return _read_positive_int_env(
+        "MINIHARNESS_TOOL_OUTPUT_PREVIEW_CHARS",
+        DEFAULT_PREVIEW_CHARS,
+        minimum=128,
+    )
 
 
 def offload_if_needed(
@@ -63,8 +72,8 @@ def offload_if_needed(
         Otherwise returns ``(preview_text, artifact_path)`` where
         *artifact_path* points to the full output on disk.
     """
-    limit = inline_limit if inline_limit is not None else DEFAULT_INLINE_CHAR_LIMIT
-    preview_len = preview_chars if preview_chars is not None else DEFAULT_PREVIEW_CHARS
+    limit = inline_limit if inline_limit is not None else tool_output_inline_chars()
+    preview_len = preview_chars if preview_chars is not None else tool_output_preview_chars()
 
     if len(output) <= limit:
         return output, None
@@ -105,6 +114,16 @@ def _artifact_root() -> Path:
     root = Path.home() / ".miniharness" / "tool_artifacts"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _read_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
 
 
 def _safe_name(tool_name: str) -> str:

@@ -71,6 +71,9 @@ class RuntimeController:
     system_prompt_override: str | None = None
     system_prompt_mode: str | None = None
     session_hooks: dict[str, Any] | None = None
+    tool_policy: dict[str, Any] | None = None
+    permission_mode: str | None = None
+    max_turns: int | None = None
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
@@ -87,6 +90,9 @@ class RuntimeController:
             system_prompt_override=self.system_prompt_override,
             system_prompt_mode=self.system_prompt_mode,
             session_hooks=self.session_hooks,
+            tool_policy=self.tool_policy,
+            permission_mode=self.permission_mode,
+            max_turns=self.max_turns,
         )
         self.loop.session_id = uuid.uuid4().hex[:12]
         self.commands = self._build_command_registry()
@@ -181,7 +187,8 @@ class RuntimeController:
                 run_agent=run_agent,
                 print_system=print_system,
             )
-            if (result.should_save or notification) and not result.exit:
+            permissions = await self._drain_swarm_permission_requests(print_system)
+            if (result.should_save or notification or permissions) and not result.exit:
                 save_loop_snapshot(self.loop)
             return not result.exit
 
@@ -190,6 +197,7 @@ class RuntimeController:
             run_agent=run_agent,
             print_system=print_system,
         )
+        await self._drain_swarm_permission_requests(print_system)
         save_loop_snapshot(self.loop)
         self._schedule_memory_extraction(print_system)
         return True
@@ -296,8 +304,9 @@ class RuntimeController:
             await print_system(
                 f"Waiting for {len(pending)} background agent task(s) to finish..."
             )
-            completed = await wait_for_completed_async_agent_entries(
-                self.loop.tool_metadata,
+            completed = await self._wait_for_async_agent_batch(
+                wait_for_completed_async_agent_entries,
+                print_system,
             )
             message = format_completed_background_task_notifications(completed)
             if not message.strip():
@@ -308,6 +317,33 @@ class RuntimeController:
             await run_agent(self.loop, message)
 
         return "\n\n".join(payloads)
+
+    async def _wait_for_async_agent_batch(
+        self,
+        wait_for_completed_async_agent_entries: Callable[..., Awaitable[list[dict]]],
+        print_system: SystemPrinter,
+    ) -> list[dict]:
+        """Wait for one agent completion batch while servicing worker prompts.
+
+        Worker agents may block on a permission request that only the parent
+        runtime can ask the user to resolve.  The coordinator wait loop must
+        therefore keep draining pending permission files instead of sleeping in
+        a single uninterruptible wait.
+        """
+        while True:
+            await self._drain_swarm_permission_requests(print_system)
+            completed = await wait_for_completed_async_agent_entries(
+                self.loop.tool_metadata,
+                timeout_seconds=0.25,
+            )
+            if completed:
+                return completed
+            try:
+                from miniharness.ui.coordinator_drain import pending_async_agent_entries
+            except Exception:
+                return []
+            if not pending_async_agent_entries(self.loop.tool_metadata):
+                return []
 
     async def _notify_completed_background_tasks(self, print_system: SystemPrinter) -> str:
         """Return completed background task notifications, if any."""
@@ -321,6 +357,50 @@ class RuntimeController:
             return message
         except Exception:
             return ""
+
+    async def _drain_swarm_permission_requests(self, print_system: SystemPrinter) -> int:
+        """Resolve pending delegated-agent permission requests."""
+        try:
+            from miniharness.swarm.permission_sync import (
+                PermissionResolution,
+                evaluate_permission_request,
+                read_pending_permissions,
+                resolve_permission,
+            )
+        except Exception:
+            return 0
+
+        requests = await read_pending_permissions()
+        resolved = 0
+        for request in requests:
+            decision = evaluate_permission_request(request, self.loop.permissions)
+            prompt = _format_swarm_permission_prompt(request)
+            if decision.allowed:
+                allowed = True
+            elif decision.requires_confirmation and self.permission_prompt is not None:
+                allowed = await self.permission_prompt(request.tool_name, prompt)
+            elif decision.requires_confirmation:
+                resolved_decision = self.loop.permissions.resolve_interactive(
+                    decision,
+                    prompt,
+                )
+                allowed = resolved_decision.allowed
+            else:
+                allowed = False
+            await resolve_permission(
+                request.id,
+                PermissionResolution(
+                    decision="approved" if allowed else "rejected",
+                    feedback=None if allowed else (decision.reason or "User denied."),
+                ),
+                request.team_name,
+            )
+            resolved += 1
+            await print_system(
+                f"Permission {'approved' if allowed else 'denied'} for "
+                f"{request.worker_id}: {request.tool_name}"
+            )
+        return resolved
 
     async def _replace_loop(self, new_loop: AgentLoop) -> None:
         old_mcp = getattr(self.loop, "_mcp_manager", None)
@@ -459,3 +539,9 @@ def _format_memory_extraction_result(result) -> str:
                     lines.append(f"  - {fact[:120]}")
 
     return "\n".join(lines)
+
+
+def _format_swarm_permission_prompt(request) -> str:
+    worker = request.worker_id or request.worker_name or "worker"
+    detail = request.description or f"Allow {request.tool_name}?"
+    return f"Allow delegated agent {worker} to run {request.tool_name}? {detail}"

@@ -7,6 +7,11 @@ from miniharness.config.settings import Settings
 from miniharness.context.carryover import record_tool_carryover
 from miniharness.messages import Message
 from miniharness.sessions import load_latest_session
+from miniharness.swarm.permission_sync import (
+    SwarmPermissionRequest,
+    read_pending_permissions,
+    write_permission_request,
+)
 from miniharness.tasks import BackgroundTaskManager, reset_background_task_manager_for_tests
 from miniharness.ui.coordinator_drain import (
     collect_completed_background_tasks,
@@ -296,6 +301,79 @@ async def test_runtime_drains_agent_notifications_until_no_pending_agents(tmp_pa
         entry.get("notification_sent") is True
         for entry in runtime.loop.tool_metadata["async_agent_tasks"]
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_drains_worker_permissions_while_waiting_for_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    manager = reset_background_task_manager_for_tests(
+        BackgroundTaskManager(tasks_dir=tmp_path / "tasks")
+    )
+    task = await manager.create_agent_task(
+        command="sleep 0.6; printf 'agent-after-permission\\n'",
+        prompt="needs approval",
+        description="worker waits for approval",
+        cwd=tmp_path,
+    )
+    manager.update_task_metadata(task.id, {"agent_id": "worker@default"})
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    record_tool_carryover(
+        runtime.loop.tool_metadata,
+        tool_name="agent",
+        arguments={
+            "description": "worker waits for approval",
+            "prompt": "needs approval",
+            "subagent_type": "worker",
+        },
+        result_output=f"Spawned agent worker@default (task_id={task.id}, backend=local_agent)",
+        is_error=False,
+    )
+    await write_permission_request(
+        SwarmPermissionRequest(
+            id="perm-while-waiting",
+            worker_id="worker@default",
+            worker_name="worker",
+            team_name="default",
+            tool_name="bash",
+            description="Allow worker bash?",
+            input={"command": "printf ok", "is_read_only": False},
+        )
+    )
+
+    approvals: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        approvals.append(tool_name)
+        return True
+
+    runtime.permission_prompt = permission_prompt
+    prompts: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        prompts.append(prompt)
+        loop.conversation.append(Message(role="user", content=prompt))
+        return "handled"
+
+    async def print_system(message: str) -> None:
+        pass
+
+    try:
+        await runtime._drain_coordinator_notifications(
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert approvals == ["bash"]
+    assert await read_pending_permissions("default") == []
+    assert len(prompts) == 1
+    assert "agent-after-permission" in prompts[0]
+    assert runtime.loop.tool_metadata["async_agent_tasks"][0]["notification_sent"] is True
 
 
 def test_collect_completed_background_tasks_ignores_missing_and_marks_sent():

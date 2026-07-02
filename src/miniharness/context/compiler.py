@@ -35,6 +35,44 @@ class ContextPacket:
     stats: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ContextCompileTrace:
+    """Inspectable summary of what the compiler sent to the model."""
+
+    message_count: int
+    system_prompt_chars: int
+    tool_count: int
+    attachment_count: int
+    attachment_types: list[str]
+    message_tokens: int
+    tool_tokens: int
+    response_reserve_tokens: int
+    total_used: int
+    available: int
+    context_window: int
+    soft_limit: int
+    tokenizer: str
+    compacted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message_count": self.message_count,
+            "system_prompt_chars": self.system_prompt_chars,
+            "tool_count": self.tool_count,
+            "attachment_count": self.attachment_count,
+            "attachment_types": list(self.attachment_types),
+            "message_tokens": self.message_tokens,
+            "tool_tokens": self.tool_tokens,
+            "response_reserve_tokens": self.response_reserve_tokens,
+            "total_used": self.total_used,
+            "available": self.available,
+            "context_window": self.context_window,
+            "soft_limit": self.soft_limit,
+            "tokenizer": self.tokenizer,
+            "compacted": self.compacted,
+        }
+
+
 class ContextCompiler:
     """Orchestrate budget checks and compaction.
 
@@ -93,6 +131,7 @@ class ContextCompiler:
         stats.update(self.budget.snapshot(msgs, tools=tools))
         stats["token_count"] = stats["total_used"]
         stats["budget_ratio"] = stats["usage_ratio"]
+        stats["attachments_built"] = len(attachments or [])
 
         if self.budget.is_over_budget(msgs, tools=tools):
             msgs, compaction_stats = await auto_compact_if_needed(
@@ -109,6 +148,14 @@ class ContextCompiler:
         stats.update(self.budget.snapshot(msgs, tools=tools))
         stats["token_count"] = stats["total_used"]
         stats["budget_ratio"] = stats["usage_ratio"]
+        stats["attachments_built"] = len(attachments or [])
+        stats["context_trace"] = build_compile_trace(
+            messages=msgs,
+            tools=tools,
+            attachments=attachments,
+            snapshot=stats,
+            compacted=bool(stats.get("compacted")),
+        ).to_dict()
         return ContextPacket(messages=msgs, tools=tools, stats=stats)
 
     async def compact_if_needed(
@@ -123,8 +170,16 @@ class ContextCompiler:
         stats.update(self.budget.snapshot(messages))
         stats["token_count"] = stats["total_used"]
         stats["budget_ratio"] = stats["usage_ratio"]
+        stats["attachments_built"] = len(attachments or [])
 
         if not (force or self.budget.is_over_budget(messages)):
+            stats["context_trace"] = build_compile_trace(
+                messages=messages,
+                tools=[],
+                attachments=attachments,
+                snapshot=stats,
+                compacted=False,
+            ).to_dict()
             return messages, stats
 
         msgs, compaction_stats = await auto_compact_if_needed(
@@ -139,6 +194,14 @@ class ContextCompiler:
         stats.update(self.budget.snapshot(msgs))
         stats["token_count"] = stats["total_used"]
         stats["budget_ratio"] = stats["usage_ratio"]
+        stats["attachments_built"] = len(attachments or [])
+        stats["context_trace"] = build_compile_trace(
+            messages=msgs,
+            tools=[],
+            attachments=attachments,
+            snapshot=stats,
+            compacted=bool(stats.get("compacted")),
+        ).to_dict()
         return msgs, stats
 
     # ------------------------------------------------------------------
@@ -184,3 +247,47 @@ def _ensure_system_prompt(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not msgs or msgs[0].get("role") != "system":
         msgs.insert(0, {"role": "system", "content": _SYSTEM_PROMPT_PLACEHOLDER})
     return msgs
+
+
+def build_compile_trace(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    attachments: list[dict[str, Any]] | None,
+    snapshot: dict[str, Any],
+    compacted: bool,
+) -> ContextCompileTrace:
+    """Build an OpenHarness-style trace for context observability."""
+    system_prompt_chars = 0
+    if messages and messages[0].get("role") == "system":
+        content = messages[0].get("content", "")
+        system_prompt_chars = len(content) if isinstance(content, str) else len(str(content))
+
+    attachment_types: list[str] = []
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        raw_type = (
+            attachment.get("type")
+            or attachment.get("name")
+            or attachment.get("title")
+            or "attachment"
+        )
+        attachment_types.append(str(raw_type))
+
+    return ContextCompileTrace(
+        message_count=len(messages),
+        system_prompt_chars=system_prompt_chars,
+        tool_count=len(tools),
+        attachment_count=len(attachments or []),
+        attachment_types=attachment_types,
+        message_tokens=int(snapshot.get("message_tokens") or 0),
+        tool_tokens=int(snapshot.get("tool_tokens") or 0),
+        response_reserve_tokens=int(snapshot.get("response_reserve_tokens") or 0),
+        total_used=int(snapshot.get("total_used") or snapshot.get("token_count") or 0),
+        available=int(snapshot.get("available") or 0),
+        context_window=int(snapshot.get("context_window") or 0),
+        soft_limit=int(snapshot.get("soft_limit") or 0),
+        tokenizer=str(snapshot.get("tokenizer") or ""),
+        compacted=compacted,
+    )

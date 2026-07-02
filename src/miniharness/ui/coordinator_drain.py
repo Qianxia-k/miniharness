@@ -106,9 +106,21 @@ async def wait_for_completed_async_agent_entries(
     *,
     manager: BackgroundTaskManager | None = None,
     poll_interval_seconds: float = 0.1,
+    timeout_seconds: float | None = None,
 ) -> list[dict]:
-    """Block until at least one pending local-agent task reaches terminal state."""
+    """Block until at least one pending local-agent task reaches terminal state.
+
+    ``timeout_seconds`` is intentionally optional so the OpenHarness-style
+    default remains "wait until a worker finishes". Runtime hosts can pass a
+    short timeout when they must continue servicing side-channel events such as
+    delegated-agent permission requests while waiting.
+    """
     manager = manager or get_background_task_manager()
+    deadline = (
+        asyncio.get_running_loop().time() + timeout_seconds
+        if timeout_seconds is not None
+        else None
+    )
     while True:
         pending = pending_async_agent_entries(tool_metadata)
         if not pending:
@@ -133,6 +145,12 @@ async def wait_for_completed_async_agent_entries(
 
         if completed:
             return completed
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return []
+            await asyncio.sleep(min(poll_interval_seconds, remaining))
+            continue
         await asyncio.sleep(poll_interval_seconds)
 
 

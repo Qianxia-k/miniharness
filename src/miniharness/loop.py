@@ -43,6 +43,7 @@ Architecture::
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -52,6 +53,7 @@ from miniharness.context.carryover import (
     build_compact_attachments,
     init_tool_metadata,
     record_tool_carryover,
+    remember_active_artifact,
     remember_user_goal,
 )
 from miniharness.context.compiler import ContextCompiler
@@ -178,6 +180,80 @@ def _normalize_hooks_config(raw: dict[str, Any] | None) -> dict[str, list[dict[s
     return normalized
 
 
+def _normalize_tool_policy(raw: dict[str, Any] | None) -> dict[str, list[str]]:
+    """Normalize session-scoped agent tool policy."""
+    if not isinstance(raw, dict):
+        return {}
+    policy: dict[str, list[str]] = {}
+    tools = _string_list(raw.get("tools"))
+    disallowed = _string_list(
+        raw.get("disallowed_tools", raw.get("disallowedTools"))
+    )
+    if tools is not None:
+        policy["tools"] = tools
+    if disallowed:
+        policy["disallowed_tools"] = disallowed
+    return policy
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [item.strip() for item in value.replace("\n", ",").split(",")]
+        return [item for item in items if item]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return None
+
+
+def _tool_allowed_by_policy(name: str, policy: dict[str, list[str]]) -> bool:
+    if not policy:
+        return True
+    lowered_name = name.lower()
+    disallowed = policy.get("disallowed_tools") or []
+    if any(_tool_pattern_matches(lowered_name, pattern) for pattern in disallowed):
+        return False
+    allowed = policy.get("tools")
+    if allowed is None or any(pattern.strip() == "*" for pattern in allowed):
+        return True
+    return any(_tool_pattern_matches(lowered_name, pattern) for pattern in allowed)
+
+
+def _tool_pattern_matches(lowered_name: str, pattern: str) -> bool:
+    normalized = pattern.strip().lower()
+    if not normalized:
+        return False
+    return lowered_name == normalized or fnmatchcase(lowered_name, normalized)
+
+
+def _normalize_permission_mode(raw: str | None) -> str:
+    if not raw:
+        return "default"
+    aliases = {
+        "default": "default",
+        "accept-edits": "accept-edits",
+        "accept_edits": "accept-edits",
+        "acceptEdits": "accept-edits",
+        "bypass": "bypass",
+        "bypassPermissions": "bypass",
+        "dangerously-skip-permissions": "bypass",
+        "full_auto": "bypass",
+        "dontAsk": "bypass",
+        "plan": "plan",
+    }
+    return aliases.get(raw.strip(), "default")
+
+
+def _normalize_max_turns(raw: int | None, *, fallback: int) -> int:
+    if raw is None:
+        return max(1, int(fallback))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return max(1, int(fallback))
+
+
 # ---------------------------------------------------------------------------
 # Static system prompt — the unchanging part of the instructions.
 # Dynamic parts (env info, core memory, on-demand memories) are assembled
@@ -214,6 +290,9 @@ class AgentLoop:
         system_prompt_override: str | None = None,
         system_prompt_mode: str | None = None,
         session_hooks: dict[str, Any] | None = None,
+        tool_policy: dict[str, Any] | None = None,
+        permission_mode: str | None = None,
+        max_turns: int | None = None,
     ) -> None:
         self.cwd = cwd
         self.settings = settings
@@ -222,6 +301,8 @@ class AgentLoop:
         self._event_bus = event_bus
         self._system_prompt_override = (system_prompt_override or "").strip()
         self._system_prompt_mode = system_prompt_mode or "append"
+        self._tool_policy = _normalize_tool_policy(tool_policy)
+        self.max_turns = _normalize_max_turns(max_turns, fallback=settings.max_turns)
 
         # ── Provider & model ──────────────────────────────────────────
         provider_profile = get_profile(settings.provider.name)
@@ -249,7 +330,10 @@ class AgentLoop:
                 agent_settings=settings.agent,
             )
             self._stream_fn = self.llm.stream
-        self.permissions = PermissionChecker(cwd=cwd)
+        self.permissions = PermissionChecker(
+            cwd=cwd,
+            mode=_normalize_permission_mode(permission_mode),
+        )
 
         # ── Plugins: load first — all downstream loaders consume them ──
         self._plugins = load_plugins(settings, cwd=cwd)
@@ -429,7 +513,7 @@ class AgentLoop:
         max_tokens_override: int | None = None
         reactive_compact_attempted = False
 
-        for turn in range(1, self.settings.max_turns + 1):
+        for turn in range(1, self.max_turns + 1):
             turn_messages = (
                 packet.messages if turn == 1
                 else self.conversation.to_openai()
@@ -569,6 +653,7 @@ class AgentLoop:
                 tool_name=tool_name, output=result.output
             )
             if artifact_path is not None:
+                remember_active_artifact(self.tool_metadata, str(artifact_path))
                 await self._emit_event(SystemRuntimeEvent(
                     message=f"Output offloaded -> {artifact_path}"
                 ))
@@ -611,6 +696,8 @@ class AgentLoop:
                 tool_name=tool_name,
                 output=inline_text,
                 is_error=result.is_error,
+                artifact_path=str(artifact_path) if artifact_path is not None else "",
+                original_output_chars=len(result.output or ""),
             ))
 
     # ------------------------------------------------------------------
@@ -644,7 +731,10 @@ class AgentLoop:
 
     def _is_tool_enabled(self, name: str, tool) -> bool:
         """Runtime tool gating for plugin-contributed capabilities."""
-        return is_tool_visible(tool, self._plugin_index)
+        return (
+            _tool_allowed_by_policy(name, self._tool_policy)
+            and is_tool_visible(tool, self._plugin_index)
+        )
 
     def _refresh_system_prompt(self, *, user_query: str = "") -> None:
         """Update the system prompt in-place for a new turn.
@@ -710,6 +800,11 @@ class AgentLoop:
             model, ratio=self.settings.context_budget_ratio
         )
         self.compiler.budget = self.budget
+
+    def set_max_turns(self, max_turns: int) -> None:
+        """Set the effective turn limit for this loop."""
+        self.max_turns = max(1, int(max_turns))
+        self.settings.max_turns = self.max_turns
 
     def clear(self) -> None:
         """Reset conversation and session state."""

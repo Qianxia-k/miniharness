@@ -41,7 +41,12 @@ from miniharness.sessions import (
 )
 from miniharness.tasks.worker_protocol import decode_worker_line
 from miniharness.ui.runtime import RuntimeController
-from miniharness.swarm.spawn_utils import AGENT_HOOKS_ENV_VAR
+from miniharness.swarm.spawn_utils import (
+    AGENT_HOOKS_ENV_VAR,
+    AGENT_MAX_TURNS_ENV_VAR,
+    AGENT_PERMISSION_MODE_ENV_VAR,
+    AGENT_TOOL_POLICY_ENV_VAR,
+)
 
 
 load_dotenv()
@@ -323,6 +328,32 @@ def _load_task_worker_session_hooks() -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _load_task_worker_tool_policy() -> dict | None:
+    """Read session-scoped tool policy provided by the parent agent process."""
+    raw = os.environ.get(AGENT_TOOL_POLICY_ENV_VAR)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _load_task_worker_permission_mode() -> str | None:
+    """Read session-scoped permission mode provided by the parent agent process."""
+    return os.environ.get(AGENT_PERMISSION_MODE_ENV_VAR) or None
+
+
+def _load_task_worker_max_turns() -> int | None:
+    """Read session-scoped max-turn override provided by the parent agent process."""
+    raw = os.environ.get(AGENT_MAX_TURNS_ENV_VAR)
+    if not raw or not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value >= 1 else None
+
+
 async def _run_task_worker(
     *,
     root: Path,
@@ -339,6 +370,9 @@ async def _run_task_worker(
         system_prompt_override=system_prompt_override,
         system_prompt_mode=system_prompt_mode,
         session_hooks=_load_task_worker_session_hooks(),
+        tool_policy=_load_task_worker_tool_policy(),
+        permission_mode=_load_task_worker_permission_mode(),
+        max_turns=_load_task_worker_max_turns(),
     )
     try:
         await runtime.start()

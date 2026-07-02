@@ -34,6 +34,10 @@ class TeammateSpawnConfig:
     command: str | None = None
     system_prompt: str | None = None
     system_prompt_mode: str | None = None
+    max_turns: int | None = None
+    tools: list[str] | None = None
+    disallowed_tools: list[str] | None = None
+    permission_mode: str | None = None
     hooks: dict | None = None
     permissions: list[str] | None = None
     metadata: dict[str, str] | None = None

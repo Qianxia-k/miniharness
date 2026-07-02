@@ -119,7 +119,9 @@ def cmd_agents(args: str, ctx: CommandContext) -> CommandResult:
             f"  source: {agent.source}",
             f"  model: {agent.model or 'default'}",
             f"  system_prompt_mode: {agent.system_prompt_mode}",
-            f"  permission_mode: {agent.permission_mode or '(not enforced yet)'}",
+            f"  permission_mode: {agent.permission_mode or '(default)'}",
+            f"  max_turns: {agent.max_turns or '(default)'}",
+            f"  initial_prompt: {'yes' if agent.initial_prompt else 'no'}",
             f"  disallowed_tools: {', '.join(agent.disallowed_tools) if agent.disallowed_tools else '(none)'}",
         ]
         if agent.path:
@@ -166,6 +168,23 @@ def cmd_tokens(args: str, ctx: CommandContext) -> CommandResult:
         f"  tools: {_fmt_int(snapshot['tool_tokens'])}",
         f"  response reserve: {_fmt_int(snapshot['response_reserve_tokens'])}",
     ]
+    trace = ctx.loop.last_context_stats.get("context_trace")
+    if isinstance(trace, dict):
+        lines.extend([
+            "",
+            "  last compile:",
+            f"    messages: {_fmt_int(trace.get('message_count'))}",
+            f"    tools exposed: {_fmt_int(trace.get('tool_count'))}",
+            f"    system prompt chars: {_fmt_int(trace.get('system_prompt_chars'))}",
+            f"    attachments: {_fmt_int(trace.get('attachment_count'))}",
+            f"    compacted: {bool(trace.get('compacted'))}",
+        ])
+        attachment_types = trace.get("attachment_types")
+        if isinstance(attachment_types, list) and attachment_types:
+            rendered = ", ".join(str(item) for item in attachment_types[:8])
+            if len(attachment_types) > 8:
+                rendered += f", +{len(attachment_types) - 8} more"
+            lines.append(f"    attachment types: {rendered}")
     return CommandResult.ok("\n".join(lines))
 
 
@@ -197,11 +216,11 @@ def cmd_model(args: str, ctx: CommandContext) -> CommandResult:
 def cmd_turns(args: str, ctx: CommandContext) -> CommandResult:
     """Show or set max turns."""
     if not args:
-        return CommandResult.ok(f"Max turns: {ctx.loop.settings.max_turns}")
+        return CommandResult.ok(f"Max turns: {ctx.loop.max_turns}")
     if not args.isdigit() or int(args) < 1:
         return CommandResult.ok(f"Invalid turn count '{args}' — must be a positive integer.")
-    ctx.loop.settings.max_turns = int(args)
-    return CommandResult.refreshed(f"Max turns set to {ctx.loop.settings.max_turns}.")
+    ctx.loop.set_max_turns(int(args))
+    return CommandResult.refreshed(f"Max turns set to {ctx.loop.max_turns}.")
 
 
 # ---------------------------------------------------------------------------

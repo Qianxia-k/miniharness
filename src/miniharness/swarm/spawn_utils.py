@@ -12,6 +12,12 @@ from pathlib import Path
 
 TEAMMATE_COMMAND_ENV_VAR = "MINIHARNESS_TEAMMATE_COMMAND"
 AGENT_HOOKS_ENV_VAR = "MINIHARNESS_AGENT_HOOKS_JSON"
+AGENT_TOOL_POLICY_ENV_VAR = "MINIHARNESS_AGENT_TOOL_POLICY_JSON"
+AGENT_PERMISSION_MODE_ENV_VAR = "MINIHARNESS_AGENT_PERMISSION_MODE"
+AGENT_MAX_TURNS_ENV_VAR = "MINIHARNESS_AGENT_MAX_TURNS"
+AGENT_ID_ENV_VAR = "MINIHARNESS_AGENT_ID"
+AGENT_NAME_ENV_VAR = "MINIHARNESS_AGENT_NAME"
+AGENT_TEAM_ENV_VAR = "MINIHARNESS_AGENT_TEAM"
 
 _TEAMMATE_ENV_VARS = [
     "ANTHROPIC_API_KEY",
@@ -91,6 +97,84 @@ def encode_agent_hooks_env(hooks: dict[str, Any] | None) -> dict[str, str]:
             separators=(",", ":"),
         )
     }
+
+
+def encode_agent_tool_policy_env(
+    *,
+    tools: list[str] | None = None,
+    disallowed_tools: list[str] | None = None,
+) -> dict[str, str]:
+    """Encode session-scoped tool visibility policy for a spawned worker."""
+    policy: dict[str, list[str]] = {}
+    if tools is not None:
+        policy["tools"] = [str(item).strip() for item in tools if str(item).strip()]
+    if disallowed_tools:
+        policy["disallowed_tools"] = [
+            str(item).strip() for item in disallowed_tools if str(item).strip()
+        ]
+    if not policy:
+        return {}
+    return {
+        AGENT_TOOL_POLICY_ENV_VAR: json.dumps(
+            policy,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+
+
+def encode_agent_permission_mode_env(permission_mode: str | None) -> dict[str, str]:
+    """Encode session-scoped permission mode for a spawned worker."""
+    mode = _normalize_permission_mode(permission_mode)
+    if mode is None:
+        return {}
+    return {AGENT_PERMISSION_MODE_ENV_VAR: mode}
+
+
+def encode_agent_max_turns_env(max_turns: int | None) -> dict[str, str]:
+    """Encode session-scoped max-turn override for a spawned worker."""
+    if max_turns is None:
+        return {}
+    try:
+        value = int(max_turns)
+    except (TypeError, ValueError):
+        return {}
+    if value < 1:
+        return {}
+    return {AGENT_MAX_TURNS_ENV_VAR: str(value)}
+
+
+def encode_agent_identity_env(
+    *,
+    agent_id: str,
+    agent_name: str,
+    team: str,
+) -> dict[str, str]:
+    """Encode delegated-agent identity for cross-process coordination."""
+    return {
+        AGENT_ID_ENV_VAR: agent_id,
+        AGENT_NAME_ENV_VAR: agent_name,
+        AGENT_TEAM_ENV_VAR: team,
+    }
+
+
+def _normalize_permission_mode(permission_mode: str | None) -> str | None:
+    if not permission_mode:
+        return None
+    normalized = permission_mode.strip()
+    aliases = {
+        "default": "default",
+        "accept-edits": "accept-edits",
+        "accept_edits": "accept-edits",
+        "acceptEdits": "accept-edits",
+        "bypass": "bypass",
+        "bypassPermissions": "bypass",
+        "dangerously-skip-permissions": "bypass",
+        "full_auto": "bypass",
+        "plan": "plan",
+        "dontAsk": "bypass",
+    }
+    return aliases.get(normalized)
 
 
 def _looks_like_python(command: str) -> bool:

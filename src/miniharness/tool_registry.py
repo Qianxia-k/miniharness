@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from miniharness.hooks import HookEvent
 from miniharness.permissions import PermissionChecker, PermissionDecision
 from miniharness.tools.agent import AgentListTool, AgentTool
 from miniharness.tools.background_task import (
@@ -21,6 +22,7 @@ from miniharness.tools.background_task import (
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
+from miniharness.tools.glob import GlobTool
 from miniharness.tools.ls import LsTool
 from miniharness.tools.memory_tool import (
     MemoryAddTool,
@@ -31,6 +33,7 @@ from miniharness.tools.read_file import ReadFileTool
 from miniharness.tools.send_message import SendMessageTool
 from miniharness.tools.task import TaskTool
 from miniharness.tools.team import TeamCreateTool, TeamDeleteTool, TeamListTool
+from miniharness.tools.todo_write import TodoWriteTool
 from miniharness.tools.web_fetch import WebFetchTool
 from miniharness.tools.write_file import WriteFileTool
 from miniharness.tools.edit_file import EditFileTool
@@ -45,11 +48,13 @@ class ToolRegistry:
         permissions: PermissionChecker | None = None,
         is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
         permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+        hook_executor=None,
     ) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._permissions = permissions
         self._is_tool_enabled = is_tool_enabled
         self._permission_prompt = permission_prompt
+        self._hook_executor = hook_executor
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
@@ -125,17 +130,41 @@ class ToolRegistry:
             if not decision.allowed:
                 if decision.requires_confirmation:
                     prompt = _permission_prompt(name, request)
+                    await self._emit_permission_notification(name, decision.reason or prompt)
                     if self._permission_prompt is not None:
                         allowed = await self._permission_prompt(name, prompt)
                         if allowed:
                             decision = PermissionDecision(True)
                         else:
                             decision = PermissionDecision(False, reason="User denied.")
+                    elif _is_swarm_worker():
+                        decision = await _request_swarm_permission(
+                            tool_name=name,
+                            arguments=parsed,
+                            request=request,
+                            prompt=prompt,
+                        )
                     else:
                         decision = self._permissions.resolve_interactive(decision, prompt)
                 if not decision.allowed:
                     return ToolResult(decision.reason, is_error=True)
         return None
+
+    async def _emit_permission_notification(self, tool_name: str, reason: str) -> None:
+        if self._hook_executor is None:
+            return
+        try:
+            await self._hook_executor.execute(
+                HookEvent.NOTIFICATION,
+                {
+                    "event": HookEvent.NOTIFICATION.value,
+                    "notification_type": "permission_prompt",
+                    "tool_name": tool_name,
+                    "reason": reason,
+                },
+            )
+        except Exception:
+            return
 
 
 def _permission_prompt(tool_name: str, request: ToolPermissionRequest) -> str:
@@ -157,6 +186,55 @@ def _resolve_permission_path(file_path: str | None, cwd: Path) -> str | None:
     if not path.is_absolute():
         path = cwd / path
     return str(path.resolve())
+
+
+def _is_swarm_worker() -> bool:
+    try:
+        from miniharness.swarm.permission_sync import is_swarm_worker
+
+        return is_swarm_worker()
+    except Exception:
+        return False
+
+
+async def _request_swarm_permission(
+    *,
+    tool_name: str,
+    arguments: Any,
+    request: ToolPermissionRequest,
+    prompt: str,
+) -> PermissionDecision:
+    try:
+        from miniharness.swarm.permission_sync import request_permission_from_leader
+
+        return await request_permission_from_leader(
+            tool_name=tool_name,
+            tool_input=_permission_request_input(arguments, request),
+            description=prompt,
+        )
+    except Exception as exc:
+        return PermissionDecision(False, reason=f"Permission sync failed: {exc}")
+
+
+def _permission_request_input(
+    arguments: Any,
+    request: ToolPermissionRequest,
+) -> dict[str, Any]:
+    if hasattr(arguments, "model_dump"):
+        try:
+            data = arguments.model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            data = arguments.model_dump()
+    elif isinstance(arguments, dict):
+        data = dict(arguments)
+    else:
+        data = {}
+    if request.file_path:
+        data.setdefault("file_path", request.file_path)
+    if request.command:
+        data.setdefault("command", request.command)
+    data.setdefault("is_read_only", request.is_read_only)
+    return data
 
 
 def create_default_registry(
@@ -186,14 +264,17 @@ def create_default_registry(
         permissions=permissions,
         is_tool_enabled=is_tool_enabled,
         permission_prompt=permission_prompt,
+        hook_executor=hook_executor,
     )
     # Read-only tools
     registry.register(ReadFileTool(cwd=cwd, permissions=permissions))
     registry.register(LsTool(cwd=cwd, permissions=permissions))
     registry.register(GrepTool(cwd=cwd, permissions=permissions))
+    registry.register(GlobTool(cwd=cwd, permissions=permissions))
     # Write tools
     registry.register(WriteFileTool(cwd=cwd, permissions=permissions))
     registry.register(EditFileTool(cwd=cwd, permissions=permissions))
+    registry.register(TodoWriteTool(cwd=cwd, permissions=permissions))
     # Shell
     registry.register(BashTool(cwd=cwd, permissions=permissions))
     # External & meta

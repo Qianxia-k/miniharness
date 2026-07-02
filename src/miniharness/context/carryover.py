@@ -206,6 +206,12 @@ def record_tool_carryover(
         _remember_work_log(metadata, f"{tool_name} ERROR: {result_output[:120]}")
 
 
+def remember_active_artifact(metadata: dict[str, Any], artifact: str) -> None:
+    """Record an artifact path that should remain visible across compaction."""
+    if artifact.strip():
+        _remember_active_artifact(metadata, artifact)
+
+
 # ---------------------------------------------------------------------------
 # Per-tool handlers
 # ---------------------------------------------------------------------------
