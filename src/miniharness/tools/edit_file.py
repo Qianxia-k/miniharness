@@ -8,6 +8,7 @@ OpenHarness uses this old_str/new_str pattern (not unified diffs) because:
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -79,8 +80,49 @@ class EditFileTool(BaseTool):
         if not raw_path:
             return []
         path = self._resolve_path(raw_path)
+        reason = f"Allow edit_file to access/change {path}?"
+        try:
+            if path.exists() and path.is_file() and arguments.old_str:
+                original = path.read_text(encoding="utf-8")
+                if arguments.old_str in original:
+                    updated = (
+                        original.replace(arguments.old_str, arguments.new_str)
+                        if arguments.replace_all
+                        else original.replace(arguments.old_str, arguments.new_str, 1)
+                    )
+                    diff_text, added, removed = _compute_diff(str(path), original, updated)
+                    reason = _format_edit_permission_prompt(path, diff_text, added, removed)
+        except (OSError, UnicodeDecodeError):
+            pass
         return [ToolPermissionRequest(
             is_read_only=False,
             file_path=str(path),
-            reason=f"Allow edit_file to access/change {path}?",
+            reason=reason,
         )]
+
+
+def _compute_diff(filename: str, original: str, updated: str) -> tuple[str, int, int]:
+    diff_lines = list(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            fromfile=filename,
+            tofile=filename,
+            lineterm="",
+        )
+    )
+    added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+    return "".join(diff_lines), added, removed
+
+
+def _format_edit_permission_prompt(path: Path, diff_text: str, added: int, removed: int) -> str:
+    max_chars = 4000
+    preview = diff_text
+    omitted = len(preview) - max_chars
+    if omitted > 0:
+        preview = preview[:max_chars] + f"\n... ({omitted} diff chars omitted)"
+    return (
+        f"Allow edit_file to update {path}? (+{added} -{removed})\n\n"
+        f"{preview}"
+    )

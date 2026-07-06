@@ -168,6 +168,12 @@ def record_tool_carryover(
         _carryover_bash(metadata, arguments, result_output)
     elif tool_name == "grep" and not is_error:
         _carryover_grep(metadata, arguments, result_output)
+    elif tool_name == "lsp" and not is_error:
+        _carryover_lsp(metadata, arguments, result_output)
+    elif tool_name == "sleep" and not is_error:
+        _remember_work_log(metadata, f"Slept for {arguments.get('seconds', 1.0)} seconds")
+    elif tool_name == "ask_user_question" and not is_error:
+        _remember_work_log(metadata, "Asked user a follow-up question")
     elif tool_name == "web_fetch" and not is_error:
         _carryover_web_fetch(metadata, arguments, result_output)
     elif tool_name == "skill" and not is_error:
@@ -176,6 +182,12 @@ def record_tool_carryover(
         pass  # memory tools are self-documenting
     elif tool_name == "task" and not is_error:
         _remember_work_log(metadata, "Updated session task list")
+    elif tool_name == "enter_plan_mode" and not is_error:
+        metadata["permission_mode"] = "plan"
+        _remember_work_log(metadata, "Entered plan mode")
+    elif tool_name == "exit_plan_mode" and not is_error:
+        metadata["permission_mode"] = "default"
+        _remember_work_log(metadata, "Exited plan mode")
     elif tool_name in {"agent", "send_message"}:
         _carryover_async_agent(
             metadata,
@@ -280,6 +292,22 @@ def _carryover_grep(
     """Record a grep search."""
     query = arguments.get("query", "")
     _remember_verified_work(metadata, f"Searched for: {query[:120]}")
+
+
+def _carryover_lsp(
+    metadata: dict[str, Any],
+    arguments: dict[str, Any],
+    result_output: str,
+) -> None:
+    """Record a code-intelligence query without carrying large raw output."""
+    del result_output
+    operation = str(arguments.get("operation") or "").strip()
+    file_path = str(arguments.get("file_path") or "").strip()
+    symbol = str(arguments.get("symbol") or arguments.get("query") or "").strip()
+    target = symbol or file_path or "workspace"
+    if file_path:
+        _remember_active_artifact(metadata, file_path)
+    _remember_verified_work(metadata, f"Ran lsp {operation} for {target[:120]}")
 
 
 def _carryover_web_fetch(
@@ -681,6 +709,7 @@ def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         return attachments
 
     builders = [
+        _build_session_memory_attachment,
         _build_task_focus_attachment,
         _build_task_list_attachment,
         _build_async_agent_attachment,
@@ -695,6 +724,28 @@ def build_compact_attachments(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         if att:
             attachments.append(att)
     return attachments
+
+
+def _build_session_memory_attachment(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    path = metadata.get("session_memory_path")
+    if not path:
+        return None
+    try:
+        from miniharness.services.session_memory import (
+            get_session_memory_content,
+            session_memory_to_compact_text,
+        )
+
+        text = session_memory_to_compact_text(get_session_memory_content(str(path)))
+    except Exception:
+        return None
+    if not text:
+        return None
+    return _render_attachment(
+        kind="session_memory",
+        title="Session Memory Checkpoint",
+        body=text,
+    )
 
 
 def _render_attachment(*, kind: str, title: str, body: str) -> dict[str, Any]:

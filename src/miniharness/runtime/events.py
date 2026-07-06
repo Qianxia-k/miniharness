@@ -56,6 +56,13 @@ class PermissionRequestEvent:
 
 
 @dataclass(frozen=True)
+class UserQuestionRequestEvent:
+    type: Literal["user_question_request"] = "user_question_request"
+    request_id: str = ""
+    question: str = ""
+
+
+@dataclass(frozen=True)
 class ErrorRuntimeEvent:
     type: Literal["error"] = "error"
     message: str = ""
@@ -119,6 +126,7 @@ RuntimeEvent = (
     | ToolStartedEvent
     | ToolCompletedEvent
     | PermissionRequestEvent
+    | UserQuestionRequestEvent
     | ErrorRuntimeEvent
     | StatusRuntimeEvent
     | SystemRuntimeEvent

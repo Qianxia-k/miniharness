@@ -49,6 +49,7 @@ def switch_session(
     target_session_id: str,
     *,
     permission_prompt=None,
+    ask_user_prompt=None,
     compact_progress=None,
     event_bus=None,
 ) -> AgentLoop | None:
@@ -76,6 +77,7 @@ def switch_session(
         cwd=current_loop.cwd,
         settings=current_loop.settings,
         permission_prompt=permission_prompt,
+        ask_user_prompt=ask_user_prompt,
         compact_progress=compact_progress,
         event_bus=event_bus,
     )

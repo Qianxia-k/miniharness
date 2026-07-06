@@ -4,7 +4,9 @@ from miniharness.config.settings import Settings
 from miniharness.llm import StreamComplete, TextDelta
 from miniharness.messages import Message
 from miniharness.runtime import AssistantDeltaEvent, RuntimeEventBus, StatusRuntimeEvent
-from miniharness.ui.backend_host import _runtime_to_protocol_event
+from miniharness.state import AppState
+from miniharness.ui.backend_host import _runtime_to_protocol_event, _state_payload
+from miniharness.ui.protocol import StateSnapshot, TaskSnapshot, TasksSnapshot, encode_event
 from miniharness.ui.runtime import RuntimeController
 
 
@@ -37,6 +39,44 @@ def test_runtime_status_event_maps_to_protocol_event():
 
     assert protocol_event.type == "status"
     assert protocol_event.message == "ready"
+
+
+def test_state_snapshot_protocol_event_serializes_runtime_state():
+    state = AppState(
+        model="qwen-test",
+        permission_mode="plan",
+        theme="default",
+        cwd="/repo",
+        session_id="abc123",
+        provider="qwen",
+        mcp_connected=2,
+        mcp_failed=1,
+    )
+
+    payload = _state_payload(state)
+    encoded = encode_event(StateSnapshot(state=payload))
+
+    assert '"type": "state_snapshot"' in encoded
+    assert payload["model"] == "qwen-test"
+    assert payload["permission_mode"] == "plan"
+    assert payload["session_id"] == "abc123"
+    assert payload["mcp_connected"] == 2
+
+
+def test_tasks_snapshot_protocol_event_serializes_task_list():
+    encoded = encode_event(TasksSnapshot(tasks=[
+        TaskSnapshot(
+            id="task-001",
+            type="session_task",
+            status="in_progress",
+            description="wire task snapshots",
+            metadata={"source": "test"},
+        )
+    ]))
+
+    assert '"type": "tasks_snapshot"' in encoded
+    assert '"id": "task-001"' in encoded
+    assert '"description": "wire task snapshots"' in encoded
 
 
 @pytest.mark.asyncio

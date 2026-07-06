@@ -8,7 +8,7 @@ Mirrors OpenHarness's OHJSON protocol.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, Literal
 
@@ -62,6 +62,14 @@ class PermissionRequest:
 
 
 @dataclass
+class UserQuestionRequest:
+    """Backend asks frontend to answer an agent follow-up question."""
+    type: Literal["user_question_request"] = "user_question_request"
+    request_id: str = ""
+    question: str = ""
+
+
+@dataclass
 class ErrorEvent:
     """Error surfaced to the frontend."""
     type: Literal["error"] = "error"
@@ -75,6 +83,30 @@ class ReadyEvent:
     model: str = ""
     cwd: str = ""
     session_id: str = ""
+
+
+@dataclass
+class StateSnapshot:
+    """Observable runtime state snapshot."""
+    type: Literal["state_snapshot"] = "state_snapshot"
+    state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TaskSnapshot:
+    """UI-safe task representation."""
+    id: str
+    type: str
+    status: str
+    description: str
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class TasksSnapshot:
+    """Observable task-list snapshot."""
+    type: Literal["tasks_snapshot"] = "tasks_snapshot"
+    tasks: list[TaskSnapshot] = field(default_factory=list)
 
 
 @dataclass
@@ -135,8 +167,9 @@ class LineComplete:
 
 BackendEvent = (
     AssistantDelta | AssistantComplete | ToolStarted | ToolCompleted
-    | PermissionRequest | ErrorEvent | ReadyEvent | ShutdownEvent | SystemMessage
-    | LineComplete | StatusEvent | TokenUsageEvent | CompactProgressEvent
+    | PermissionRequest | UserQuestionRequest | ErrorEvent | ReadyEvent
+    | StateSnapshot | TasksSnapshot | ShutdownEvent | SystemMessage | LineComplete
+    | StatusEvent | TokenUsageEvent | CompactProgressEvent
 )
 
 
@@ -161,6 +194,14 @@ class PermissionResponse:
 
 
 @dataclass
+class UserQuestionResponse:
+    """User answered an agent follow-up question."""
+    type: Literal["user_question_response"] = "user_question_response"
+    request_id: str = ""
+    answer: str = ""
+
+
+@dataclass
 class Interrupt:
     """User pressed Ctrl+C."""
     type: Literal["interrupt"] = "interrupt"
@@ -172,7 +213,7 @@ class FrontendShutdown:
     type: Literal["shutdown"] = "shutdown"
 
 
-FrontendRequest = SubmitLine | PermissionResponse | Interrupt | FrontendShutdown
+FrontendRequest = SubmitLine | PermissionResponse | UserQuestionResponse | Interrupt | FrontendShutdown
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -217,10 +258,26 @@ def decode_event(line: str) -> dict | None:
 
 
 def _asdict(obj) -> dict:
-    """Convert a dataclass to dict, skipping None values."""
-    result = {}
-    for f in obj.__dataclass_fields__:
-        val = getattr(obj, f)
-        if val is not None:
-            result[f] = val
-    return result
+    """Convert nested dataclasses to dicts, skipping None values."""
+    return _to_jsonable(obj)
+
+
+def _to_jsonable(value):
+    if is_dataclass(value):
+        result = {}
+        for f in value.__dataclass_fields__:
+            item = getattr(value, f)
+            if item is not None:
+                result[f] = _to_jsonable(item)
+        return result
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _to_jsonable(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    return value

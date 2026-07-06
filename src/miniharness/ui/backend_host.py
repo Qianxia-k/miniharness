@@ -35,6 +35,7 @@ from miniharness.runtime import (
     TokenUsageRuntimeEvent,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UserQuestionRequestEvent,
 )
 from miniharness.ui.protocol import (
     AssistantComplete,
@@ -45,15 +46,19 @@ from miniharness.ui.protocol import (
     PermissionRequest,
     ReadyEvent,
     ShutdownEvent,
+    StateSnapshot,
     StatusEvent,
     SystemMessage,
+    TasksSnapshot,
     TokenUsageEvent,
     ToolCompleted,
     ToolStarted,
+    UserQuestionRequest,
     decode_message,
     encode_event,
 )
 from miniharness.ui.runtime import RuntimeController
+from miniharness.state import AppState
 
 
 class BackendHost:
@@ -64,20 +69,26 @@ class BackendHost:
         self.settings = settings
         self._runtime: RuntimeController | None = None
         self._pending_perm: dict[str, asyncio.Future[bool]] = {}
+        self._pending_questions: dict[str, asyncio.Future[str]] = {}
         self._request_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._active_request_task: asyncio.Task[bool] | None = None
         self.event_bus = RuntimeEventBus()
         self.event_bus.subscribe(self._emit_protocol_event)
         self._busy = False
         self._running = True
+        self._state_unsubscribe = None
 
     async def run(self) -> None:
         self._runtime = RuntimeController(
             cwd=self.cwd,
             settings=self.settings,
             permission_prompt=self._ask_permission,
+            ask_user_prompt=self._ask_user_question,
             compact_progress=self._emit_compact_progress,
             event_bus=self.event_bus,
+        )
+        self._state_unsubscribe = self._runtime.state_store.subscribe(
+            self._emit_state_snapshot
         )
         await self._runtime.start()
 
@@ -86,6 +97,8 @@ class BackendHost:
             cwd=str(self.cwd),
             session_id=self._runtime.loop.session_id or "",
         ))
+        self._emit_state_snapshot(self._runtime.state_store.get())
+        self._emit_tasks_snapshot()
 
         self._start_reader_thread(asyncio.get_running_loop())
         try:
@@ -153,6 +166,13 @@ class BackendHost:
                     msg.get("allowed", False),
                 )
                 continue
+            if request_type == "user_question_response":
+                loop.call_soon_threadsafe(
+                    self._handle_user_question_response,
+                    msg.get("request_id", ""),
+                    msg.get("answer", ""),
+                )
+                continue
             if request_type == "interrupt":
                 loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(self._interrupt_active_request())
@@ -197,11 +217,9 @@ class BackendHost:
                 clear_output=self._clear_output,
             )
             await self._publish(StatusRuntimeEvent(
-                message=(
-                    f"Model: {runtime.loop.model}  |  "
-                    f"Session: {(runtime.loop.session_id or '')[:12]}"
-                )
+                message=_format_runtime_status(runtime)
             ))
+            self._emit_tasks_snapshot()
             return should_continue
         except Exception as exc:
             await self._publish(ErrorRuntimeEvent(message=str(exc)))
@@ -295,7 +313,29 @@ class BackendHost:
         except asyncio.TimeoutError:
             return False
 
+    def _handle_user_question_response(self, request_id: str, answer: str) -> None:
+        fut = self._pending_questions.pop(request_id, None)
+        if fut and not fut.done():
+            fut.set_result(str(answer))
+
+    async def _ask_user_question(self, question: str) -> str:
+        """Request an answer from the frontend and wait for response."""
+        req_id = uuid.uuid4().hex[:8]
+        fut: asyncio.Future[str] = asyncio.Future()
+        self._pending_questions[req_id] = fut
+        await self._publish(UserQuestionRequestEvent(
+            request_id=req_id,
+            question=question,
+        ))
+        try:
+            return await asyncio.wait_for(fut, timeout=300)
+        except asyncio.TimeoutError:
+            return ""
+
     async def _shutdown(self) -> None:
+        if self._state_unsubscribe is not None:
+            self._state_unsubscribe()
+            self._state_unsubscribe = None
         if self._runtime is not None:
             await self._runtime.close()
             self._runtime = None
@@ -312,8 +352,25 @@ class BackendHost:
         sys.stdout.write(encode_event(event) + "\n")
         sys.stdout.flush()
 
+    def _emit_state_snapshot(self, state: AppState) -> None:
+        self._emit(StateSnapshot(state=_state_payload(state)))
+
+    def _emit_tasks_snapshot(self) -> None:
+        if self._runtime is None:
+            return
+        self._emit(TasksSnapshot(tasks=self._runtime.task_snapshots()))
+
 
 def _is_error_result(result: str) -> bool:
+    """
+    检查结果字符串是否为已知的错误类型。
+    
+    Args:
+        result (str): LLM 或工具返回的结果字符串
+    
+    Returns:
+        bool: 若结果以已知错误前缀开头则返回 True，否则返回 False
+    """
     return result.startswith((
         "API error:",
         "Network error:",
@@ -322,6 +379,43 @@ def _is_error_result(result: str) -> bool:
         "No response from model.",
         "Reached maximum turns",
     ))
+
+
+def _format_runtime_status(runtime: RuntimeController) -> str:
+    state = runtime.state_store.get()
+    parts = [
+        f"Model: {state.model}",
+        f"Session: {state.session_id[:12]}",
+        f"Mode: {state.permission_mode}",
+    ]
+    if state.mcp_connected or state.mcp_failed:
+        parts.append(f"MCP: {state.mcp_connected} connected/{state.mcp_failed} failed")
+    return "  |  ".join(parts)
+
+
+def _state_payload(state: AppState) -> dict[str, Any]:
+    return {
+        "model": state.model,
+        "cwd": state.cwd,
+        "session_id": state.session_id,
+        "provider": state.provider,
+        "auth_status": state.auth_status,
+        "base_url": state.base_url,
+        "permission_mode": state.permission_mode,
+        "theme": state.theme,
+        "vim_enabled": state.vim_enabled,
+        "voice_enabled": state.voice_enabled,
+        "voice_available": state.voice_available,
+        "voice_reason": state.voice_reason,
+        "fast_mode": state.fast_mode,
+        "effort": state.effort,
+        "passes": state.passes,
+        "mcp_connected": state.mcp_connected,
+        "mcp_failed": state.mcp_failed,
+        "bridge_sessions": state.bridge_sessions,
+        "output_style": state.output_style,
+        "keybindings": dict(state.keybindings),
+    }
 
 
 def _runtime_to_protocol_event(event: RuntimeEvent):
@@ -344,6 +438,11 @@ def _runtime_to_protocol_event(event: RuntimeEvent):
             request_id=event.request_id,
             tool_name=event.tool_name,
             prompt=event.prompt,
+        )
+    if isinstance(event, UserQuestionRequestEvent):
+        return UserQuestionRequest(
+            request_id=event.request_id,
+            question=event.question,
         )
     if isinstance(event, ErrorRuntimeEvent):
         return ErrorEvent(message=event.message)

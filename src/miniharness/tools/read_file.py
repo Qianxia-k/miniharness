@@ -13,12 +13,18 @@ class ReadFileInput(BaseModel):
     """Arguments for read_file."""
 
     path: str = Field(description="File path to read")
+    offset: int = Field(default=0, ge=0, description="Zero-based starting line")
+    limit: int = Field(default=200, ge=1, le=2000, description="Number of lines to return")
 
 
 class ReadFileTool(BaseTool):
     name = "read_file"
-    description = "Read a UTF-8 text file from the current workspace."
+    description = "Read a UTF-8 text file from the current workspace with line numbers."
     input_model = ReadFileInput
+
+    def is_read_only(self, arguments: ReadFileInput) -> bool:
+        del arguments
+        return True
 
     async def execute(self, arguments: ReadFileInput) -> ToolResult:
         raw_path = arguments.path.strip()
@@ -45,4 +51,17 @@ class ReadFileTool(BaseTool):
             return ToolResult(f"File not found: {path}", is_error=True)
         if path.is_dir():
             return ToolResult(f"Cannot read directory: {path}", is_error=True)
-        return ToolResult(path.read_text(encoding="utf-8", errors="replace"))
+        raw = path.read_bytes()
+        if b"\x00" in raw:
+            return ToolResult(f"Binary file cannot be read as text: {path}", is_error=True)
+
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        selected = lines[arguments.offset : arguments.offset + arguments.limit]
+        numbered = [
+            f"{arguments.offset + index + 1:>6}\t{line}"
+            for index, line in enumerate(selected)
+        ]
+        if not numbered:
+            return ToolResult(f"(no content in selected range for {path})")
+        return ToolResult("\n".join(numbered))

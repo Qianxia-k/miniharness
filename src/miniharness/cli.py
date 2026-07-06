@@ -301,6 +301,7 @@ async def _run(
         cwd=root,
         settings=settings,
         event_bus=event_bus,
+        ask_user_prompt=_ask_cli_user_question,
         system_prompt_override=system_prompt_override,
         system_prompt_mode=system_prompt_mode,
     )
@@ -414,6 +415,7 @@ async def _run_repl(
         cwd=root,
         settings=settings,
         event_bus=event_bus,
+        ask_user_prompt=_ask_cli_user_question,
         system_prompt_override=system_prompt_override,
         system_prompt_mode=system_prompt_mode,
     )
@@ -486,6 +488,16 @@ async def _run_cli_agent(loop: AgentLoop, prompt: str) -> str:
 async def _print_cli_system(message: str) -> None:
     if message:
         console.print(message)
+
+
+async def _ask_cli_user_question(question: str) -> str:
+    if question.strip():
+        console.print(f"[bold cyan]?[/bold cyan] {question}")
+    try:
+        return await asyncio.to_thread(console.input, "[bold]answer▸[/bold] ")
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return ""
 
 
 async def _clear_cli_output() -> None:

@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from miniharness.hooks import HookEvent
 from miniharness.permissions import PermissionChecker, PermissionDecision
+from miniharness.tools.ask_user_question import AskUserPrompt, AskUserQuestionTool
 from miniharness.tools.agent import AgentListTool, AgentTool
 from miniharness.tools.background_task import (
     TaskCreateTool,
@@ -23,14 +24,17 @@ from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 from miniharness.tools.bash import BashTool
 from miniharness.tools.grep import GrepTool
 from miniharness.tools.glob import GlobTool
+from miniharness.tools.lsp import LspTool
 from miniharness.tools.ls import LsTool
 from miniharness.tools.memory_tool import (
     MemoryAddTool,
     MemoryLogTool,
     MemorySearchTool,
 )
+from miniharness.tools.plan_mode import EnterPlanModeTool, ExitPlanModeTool
 from miniharness.tools.read_file import ReadFileTool
 from miniharness.tools.send_message import SendMessageTool
+from miniharness.tools.sleep import SleepTool
 from miniharness.tools.task import TaskTool
 from miniharness.tools.team import TeamCreateTool, TeamDeleteTool, TeamListTool
 from miniharness.tools.todo_write import TodoWriteTool
@@ -245,6 +249,7 @@ def create_default_registry(
     is_tool_enabled: Callable[[str, BaseTool], bool] | None = None,
     plugin_index: list[dict] | None = None,
     permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+    ask_user_prompt: AskUserPrompt | None = None,
     task_manager=None,
     hook_executor=None,
 ) -> ToolRegistry:
@@ -271,6 +276,13 @@ def create_default_registry(
     registry.register(LsTool(cwd=cwd, permissions=permissions))
     registry.register(GrepTool(cwd=cwd, permissions=permissions))
     registry.register(GlobTool(cwd=cwd, permissions=permissions))
+    registry.register(LspTool(cwd=cwd, permissions=permissions))
+    registry.register(SleepTool(cwd=cwd, permissions=permissions))
+    registry.register(AskUserQuestionTool(
+        cwd=cwd,
+        permissions=permissions,
+        ask_user_prompt=ask_user_prompt,
+    ))
     # Write tools
     registry.register(WriteFileTool(cwd=cwd, permissions=permissions))
     registry.register(EditFileTool(cwd=cwd, permissions=permissions))
@@ -297,6 +309,8 @@ def create_default_registry(
     registry.register(TaskOutputTool(cwd=cwd, permissions=permissions))
     registry.register(TaskStopTool(cwd=cwd, permissions=permissions))
     registry.register(TaskUpdateTool(cwd=cwd, permissions=permissions))
+    registry.register(EnterPlanModeTool(cwd=cwd, permissions=permissions))
+    registry.register(ExitPlanModeTool(cwd=cwd, permissions=permissions))
     # Memory (agent-managed, always allowed)
     registry.register(MemorySearchTool(cwd=cwd, permissions=permissions))
     registry.register(MemoryAddTool(cwd=cwd, permissions=permissions))

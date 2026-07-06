@@ -89,6 +89,72 @@ class PermissionModal(ModalScreen[bool]):
             self.dismiss(False)
 
 
+class UserQuestionModal(ModalScreen[str]):
+    """Modal prompt for agent follow-up questions."""
+
+    DEFAULT_CSS = """
+    UserQuestionModal {
+        align: center middle;
+    }
+    #question-dialog {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        border: round blue;
+    }
+    #question-answer {
+        margin-top: 1;
+    }
+    #question-actions {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, question: str) -> None:
+        super().__init__()
+        self._question = question
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(
+                Panel.fit(
+                    self._question[:800],
+                    title="Agent Question",
+                )
+            ),
+            Input(placeholder="Type your answer...", id="question-answer"),
+            Horizontal(
+                Button("Send", id="send", variant="primary"),
+                Button("Cancel", id="cancel", variant="default"),
+                id="question-actions",
+            ),
+            id="question-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#question-answer", Input).focus()
+
+    @on(Input.Submitted, "#question-answer")
+    def handle_answer_submit(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    @on(Button.Pressed)
+    def handle_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "send":
+            self.dismiss(self.query_one("#question-answer", Input).value.strip())
+        else:
+            self.dismiss("")
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+
 def _startup_requests_tui(resume_id: str | None, initial_prompt: str | None) -> list[dict]:
     """Build initial backend requests in runtime order."""
     requests: list[dict] = []
@@ -163,8 +229,10 @@ class MiniHarnessTUI(App[None]):
         self._assistant_buffer = ""
         self._busy = False
         self._model = "?"
+        self._permission_mode = "default"
         self._session_id = ""
         self._last_tool = "No tool calls yet."
+        self._tasks_summary = "No tasks yet."
         self._last_memory = "No memory updates yet."
         self._token_usage = "Token usage pending."
 
@@ -265,6 +333,14 @@ class MiniHarnessTUI(App[None]):
             self._refresh_sidebars()
             return
 
+        if event_type == "state_snapshot":
+            self._handle_state_snapshot(event)
+            return
+
+        if event_type == "tasks_snapshot":
+            self._handle_tasks_snapshot(event)
+            return
+
         if event_type == "assistant_delta":
             self._assistant_buffer += event.get("text", "")
             self._set_current(f"[bold]assistant>[/bold] {self._assistant_buffer}")
@@ -326,6 +402,10 @@ class MiniHarnessTUI(App[None]):
             self._handle_permission_request(event)
             return
 
+        if event_type == "user_question_request":
+            self._handle_user_question_request(event)
+            return
+
         if event_type == "error":
             self._append(f"[red]error> {event.get('message', '')}[/red]")
             self._finish_line()
@@ -354,6 +434,62 @@ class MiniHarnessTUI(App[None]):
             self._append(f"[dim]permission> {tool_name}: {label}[/dim]")
 
         self.push_screen(PermissionModal(tool_name, prompt), _done)
+
+    def _handle_state_snapshot(self, event: dict[str, Any]) -> None:
+        state = event.get("state", {})
+        if not isinstance(state, dict):
+            return
+        self._model = str(state.get("model") or self._model)
+        self._session_id = str(state.get("session_id") or self._session_id)
+        self._permission_mode = str(state.get("permission_mode") or self._permission_mode)
+        cwd = state.get("cwd")
+        if cwd:
+            self._cwd = Path(str(cwd))
+        self._refresh_sidebars()
+
+    def _handle_tasks_snapshot(self, event: dict[str, Any]) -> None:
+        tasks = event.get("tasks", [])
+        if not isinstance(tasks, list) or not tasks:
+            self._tasks_summary = "No tasks yet."
+            self._refresh_sidebars()
+            return
+        total = len(tasks)
+        active = sum(
+            1
+            for task in tasks
+            if isinstance(task, dict) and task.get("status") in {"in_progress", "running"}
+        )
+        completed = sum(
+            1
+            for task in tasks
+            if isinstance(task, dict) and task.get("status") in {"completed"}
+        )
+        failed = sum(
+            1
+            for task in tasks
+            if isinstance(task, dict) and task.get("status") in {"failed", "killed"}
+        )
+        newest = next((task for task in tasks if isinstance(task, dict)), {})
+        newest_desc = str(newest.get("description") or newest.get("id") or "").strip()[:80]
+        self._tasks_summary = (
+            f"{total} total, {active} active, {completed} done, {failed} failed"
+            + (f"\nlatest: {newest_desc}" if newest_desc else "")
+        )
+        self._refresh_sidebars()
+
+    def _handle_user_question_request(self, event: dict[str, Any]) -> None:
+        request_id = event.get("request_id", "")
+        question = event.get("question", "")
+
+        def _done(answer: str | None) -> None:
+            self._send({
+                "type": "user_question_response",
+                "request_id": request_id,
+                "answer": answer or "",
+            })
+            self._append("[dim]question> answered[/dim]" if answer else "[dim]question> no response[/dim]")
+
+        self.push_screen(UserQuestionModal(question), _done)
 
     def _handle_compact_progress(self, event: dict[str, Any]) -> None:
         message = _format_compact_progress(event)
@@ -397,6 +533,7 @@ class MiniHarnessTUI(App[None]):
         status_lines = [
             "[b]Status[/b]",
             f"model: {self._model}",
+            f"mode: {self._permission_mode}",
             f"cwd: {self._cwd}",
         ]
         if extra_status:
@@ -412,7 +549,7 @@ class MiniHarnessTUI(App[None]):
             "\n".join(["[b]Memory[/b]", self._last_memory])
         )
         self.query_one("#tool-panel", Static).update(
-            "\n".join(["[b]Last Tool[/b]", self._last_tool])
+            "\n".join(["[b]Tasks[/b]", self._tasks_summary, "", "[b]Last Tool[/b]", self._last_tool])
         )
 
     def _send(self, message: dict) -> None:

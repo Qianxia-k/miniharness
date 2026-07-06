@@ -108,6 +108,10 @@ from miniharness.runtime import (
     ToolCompletedEvent,
     ToolStartedEvent,
 )
+from miniharness.services.session_memory import (
+    prepare_session_memory_metadata,
+    update_session_memory_file,
+)
 from miniharness.skills import SkillTool, load_skill_registry
 from miniharness.tasks import TaskListManager
 from miniharness.tool_registry import create_default_registry
@@ -285,6 +289,7 @@ class AgentLoop:
         cwd: Path,
         settings: Settings,
         permission_prompt: Callable[[str, str], Awaitable[bool]] | None = None,
+        ask_user_prompt: Callable[[str], Awaitable[str]] | None = None,
         compact_progress: Callable[[dict], Awaitable[None]] | None = None,
         event_bus: RuntimeEventBus | None = None,
         system_prompt_override: str | None = None,
@@ -297,6 +302,7 @@ class AgentLoop:
         self.cwd = cwd
         self.settings = settings
         self._permission_prompt = permission_prompt
+        self._ask_user_prompt = ask_user_prompt
         self._compact_progress = compact_progress
         self._event_bus = event_bus
         self._system_prompt_override = (system_prompt_override or "").strip()
@@ -377,6 +383,7 @@ class AgentLoop:
             is_tool_enabled=self._is_tool_enabled,
             plugin_index=self._plugin_index,
             permission_prompt=self._permission_prompt,
+            ask_user_prompt=self._ask_user_prompt,
             task_manager=self.task_manager,
             hook_executor=self._hook_executor,
         )
@@ -453,6 +460,7 @@ class AgentLoop:
                         pass
 
         # ── Per-turn setup ────────────────────────────────────────────
+        self._prepare_session_memory()
         self._refresh_system_prompt(user_query=prompt)
         remember_user_goal(self.tool_metadata, prompt)
 
@@ -474,6 +482,7 @@ class AgentLoop:
             return f"Hook blocked: {hook_result.reason}"
 
         self.conversation.append(Message(role="user", content=prompt))
+        self._update_session_memory()
 
         # ── Compile context (budget check + compaction) ────────────────
         # ── Hook: pre_compact (fires before any compaction) ────────────
@@ -588,8 +597,10 @@ class AgentLoop:
             await self._emit_event(AssistantCompleteEvent(
                 text=response_message.content or ""
             ))
+            self._update_session_memory()
             return response_message.content or ""
 
+        self._update_session_memory()
         return "Reached maximum turns without a final answer."
 
     # ------------------------------------------------------------------
@@ -692,6 +703,7 @@ class AgentLoop:
                 content=inline_text,
                 tool_call_id=tool_call_id,
             ))
+            self._update_session_memory()
             await self._emit_event(ToolCompletedEvent(
                 tool_name=tool_name,
                 output=inline_text,
@@ -750,6 +762,29 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Session management
     # ------------------------------------------------------------------
+
+    def _prepare_session_memory(self) -> None:
+        """Ensure this session has a deterministic session-memory path."""
+        try:
+            prepare_session_memory_metadata(
+                self.cwd,
+                self.tool_metadata,
+                session_id=self.session_id or "default",
+            )
+        except Exception:
+            return
+
+    def _update_session_memory(self) -> None:
+        """Best-effort checkpoint for compact/resume continuity."""
+        try:
+            update_session_memory_file(
+                self.cwd,
+                self.conversation.messages,
+                tool_metadata=self.tool_metadata,
+                session_id=self.session_id or "default",
+            )
+        except Exception:
+            return
 
     def export_messages(self) -> list[dict]:
         """Export all messages as JSON-serializable dicts."""

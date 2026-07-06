@@ -21,6 +21,9 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("ls") is not None
     assert registry.get("grep") is not None
     assert registry.get("glob") is not None
+    assert registry.get("lsp") is not None
+    assert registry.get("sleep") is not None
+    assert registry.get("ask_user_question") is not None
     assert registry.get("write_file") is not None
     assert registry.get("edit_file") is not None
     assert registry.get("todo_write") is not None
@@ -39,6 +42,8 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("task_output") is not None
     assert registry.get("task_stop") is not None
     assert registry.get("task_update") is not None
+    assert registry.get("enter_plan_mode") is not None
+    assert registry.get("exit_plan_mode") is not None
     assert registry.get("memory_search") is not None
     assert registry.get("memory_add") is not None
     assert registry.get("memory_log") is not None
@@ -164,6 +169,75 @@ async def test_write_file_async_permission_denial_blocks_write(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_read_file_returns_numbered_limited_range(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        "one\n"
+        "two\n"
+        "three\n"
+        "four\n",
+        encoding="utf-8",
+    )
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+    )
+
+    result = await registry.execute("read_file", {
+        "path": "sample.py",
+        "offset": 1,
+        "limit": 2,
+    })
+
+    assert result.is_error is False
+    assert result.output == "     2\ttwo\n     3\tthree"
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_binary_files(tmp_path: Path):
+    (tmp_path / "data.bin").write_bytes(b"abc\x00def")
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+    )
+
+    result = await registry.execute("read_file", {"path": "data.bin"})
+
+    assert result.is_error is True
+    assert "Binary file" in result.output
+
+
+@pytest.mark.asyncio
+async def test_edit_file_permission_prompt_includes_diff(tmp_path: Path):
+    target = tmp_path / "app.py"
+    target.write_text("print('old')\n", encoding="utf-8")
+    prompts: list[tuple[str, str]] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append((tool_name, prompt))
+        return True
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("edit_file", {
+        "path": "app.py",
+        "old_str": "print('old')",
+        "new_str": "print('new')",
+    })
+
+    assert result.is_error is False
+    assert target.read_text(encoding="utf-8") == "print('new')\n"
+    assert prompts[0][0] == "edit_file"
+    assert "Allow edit_file to update" in prompts[0][1]
+    assert "+print('new')" in prompts[0][1]
+    assert "-print('old')" in prompts[0][1]
+    assert "(+1 -1)" in prompts[0][1]
+
+
+@pytest.mark.asyncio
 async def test_glob_lists_matching_files_without_permission_prompt(tmp_path: Path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -185,6 +259,200 @@ async def test_glob_lists_matching_files_without_permission_prompt(tmp_path: Pat
     assert result.is_error is False
     assert result.output == "src/app.py"
     assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_lsp_inspects_python_symbols_without_permission_prompt(tmp_path: Path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "utils.py").write_text(
+        "def greet(name: str) -> str:\n"
+        "    \"\"\"Return a greeting.\"\"\"\n"
+        "    return f'Hello {name}'\n"
+        "\n"
+        "class Greeter:\n"
+        "    def speak(self, name: str) -> str:\n"
+        "        return greet(name)\n",
+        encoding="utf-8",
+    )
+    (pkg / "app.py").write_text(
+        "from pkg.utils import greet\n"
+        "\n"
+        "def run() -> str:\n"
+        "    return greet('Ada')\n",
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append(tool_name)
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    symbols = await registry.execute("lsp", {
+        "operation": "document_symbol",
+        "file_path": "pkg/utils.py",
+    })
+    workspace = await registry.execute("lsp", {
+        "operation": "workspace_symbol",
+        "query": "greet",
+    })
+    definition = await registry.execute("lsp", {
+        "operation": "go_to_definition",
+        "file_path": "pkg/app.py",
+        "symbol": "greet",
+    })
+    references = await registry.execute("lsp", {
+        "operation": "find_references",
+        "file_path": "pkg/app.py",
+        "symbol": "greet",
+    })
+    hover = await registry.execute("lsp", {
+        "operation": "hover",
+        "file_path": "pkg/app.py",
+        "symbol": "greet",
+    })
+
+    assert symbols.is_error is False
+    assert "function greet - pkg/utils.py:1:1" in symbols.output
+    assert "class Greeter - pkg/utils.py:5:1" in symbols.output
+    assert workspace.is_error is False
+    assert "function greet - pkg/utils.py:1:1" in workspace.output
+    assert definition.is_error is False
+    assert "function greet - pkg/utils.py:1:1" in definition.output
+    assert references.is_error is False
+    assert "pkg/app.py:4:return greet('Ada')" in references.output
+    assert hover.is_error is False
+    assert "signature: def greet(name)" in hover.output
+    assert "docstring: Return a greeting." in hover.output
+    assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_lsp_records_carryover_when_executed_by_agent_loop(tmp_path: Path):
+    (tmp_path / "app.py").write_text(
+        "def main() -> str:\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+
+    try:
+        await runtime.loop._execute_tools([
+            {
+                "id": "call-lsp",
+                "type": "function",
+                "function": {
+                    "name": "lsp",
+                    "arguments": '{"operation":"document_symbol","file_path":"app.py"}',
+                },
+            }
+        ])
+    finally:
+        await runtime.close()
+
+    assert "app.py" in runtime.loop.tool_metadata["task_focus_state"]["active_artifacts"]
+    assert any(
+        "Ran lsp document_symbol for app.py" in entry
+        for entry in runtime.loop.tool_metadata["recent_verified_work"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_sleep_tool_is_read_only_and_does_not_prompt(tmp_path: Path):
+    prompts: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append(tool_name)
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("sleep", {"seconds": 0.0})
+
+    assert result.is_error is False
+    assert result.output == "Slept for 0.0 seconds"
+    assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_returns_unavailable_without_frontend_callback(tmp_path: Path):
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+    )
+
+    result = await registry.execute("ask_user_question", {"question": "Which branch?"})
+
+    assert result.is_error is True
+    assert "unavailable" in result.output
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_uses_frontend_callback(tmp_path: Path):
+    questions: list[str] = []
+
+    async def ask_user_prompt(question: str) -> str:
+        questions.append(question)
+        return "feature/login"
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        ask_user_prompt=ask_user_prompt,
+    )
+
+    result = await registry.execute("ask_user_question", {"question": "Which branch?"})
+
+    assert result.is_error is False
+    assert result.output == "feature/login"
+    assert questions == ["Which branch?"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_controller_wires_ask_user_question_into_agent_loop(tmp_path: Path):
+    questions: list[str] = []
+
+    async def ask_user_prompt(question: str) -> str:
+        questions.append(question)
+        return "pytest"
+
+    runtime = RuntimeController(
+        cwd=tmp_path,
+        settings=Settings(),
+        ask_user_prompt=ask_user_prompt,
+    )
+
+    try:
+        await runtime.loop._execute_tools([
+            {
+                "id": "call-question",
+                "type": "function",
+                "function": {
+                    "name": "ask_user_question",
+                    "arguments": '{"question":"Which test should I run?"}',
+                },
+            }
+        ])
+    finally:
+        await runtime.close()
+
+    assert questions == ["Which test should I run?"]
+    assert runtime.loop.conversation.messages[-1].content == "pytest"
+    assert any(
+        "Asked user a follow-up question" in entry
+        for entry in runtime.loop.tool_metadata["recent_work_log"]
+    )
 
 
 @pytest.mark.asyncio
@@ -326,3 +594,67 @@ def test_tool_output_offload_thresholds_are_env_configurable(
     assert artifact.exists()
     assert "Original size: 300 chars" in inline
     assert "Inline preview (first 128 chars" in inline
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_tools_switch_permission_mode_and_gate_writes(tmp_path: Path):
+    prompts: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append(tool_name)
+        return True
+
+    permissions = PermissionChecker(cwd=tmp_path, mode="default")
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=permissions,
+        permission_prompt=permission_prompt,
+    )
+
+    entered = await registry.execute("enter_plan_mode", {})
+    blocked = await registry.execute("write_file", {
+        "path": "blocked.txt",
+        "content": "no",
+    })
+    exited = await registry.execute("exit_plan_mode", {})
+    allowed = await registry.execute("write_file", {
+        "path": "allowed.txt",
+        "content": "ok",
+    })
+
+    assert entered.is_error is False
+    assert entered.output == "Permission mode set to plan"
+    assert permissions.mode == "default"
+    assert blocked.is_error is True
+    assert "Read-only mode" in blocked.output
+    assert not (tmp_path / "blocked.txt").exists()
+    assert exited.output == "Permission mode set to default"
+    assert allowed.is_error is False
+    assert (tmp_path / "allowed.txt").read_text(encoding="utf-8") == "ok"
+    assert prompts == ["write_file"]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_tools_record_carryover_metadata(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+
+    try:
+        await runtime.loop._execute_tools([
+            {
+                "id": "call-plan",
+                "type": "function",
+                "function": {
+                    "name": "enter_plan_mode",
+                    "arguments": "{}",
+                },
+            }
+        ])
+    finally:
+        await runtime.close()
+
+    assert runtime.loop.permissions.mode == "plan"
+    assert runtime.loop.tool_metadata["permission_mode"] == "plan"
+    assert any(
+        "Entered plan mode" in entry
+        for entry in runtime.loop.tool_metadata["recent_work_log"]
+    )

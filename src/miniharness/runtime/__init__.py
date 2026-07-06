@@ -16,6 +16,7 @@ from miniharness.runtime.events import (
     TokenUsageRuntimeEvent,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UserQuestionRequestEvent,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "TokenUsageRuntimeEvent",
     "ToolCompletedEvent",
     "ToolStartedEvent",
+    "UserQuestionRequestEvent",
 ]

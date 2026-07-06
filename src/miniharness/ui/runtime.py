@@ -50,12 +50,15 @@ from miniharness.sessions import (
     save_loop_snapshot,
     switch_session,
 )
+from miniharness.state import AppState, AppStateStore
+from miniharness.ui.protocol import TaskSnapshot
 
 
 SystemPrinter = Callable[[str], Awaitable[None]]
 AgentRunner = Callable[[AgentLoop, str], Awaitable[str]]
 ClearHandler = Callable[[], Awaitable[None]]
 PermissionPrompt = Callable[[str, str], Awaitable[bool]]
+AskUserPrompt = Callable[[str], Awaitable[str]]
 CompactProgressHandler = Callable[[dict], Awaitable[None]]
 
 
@@ -66,6 +69,7 @@ class RuntimeController:
     cwd: Path
     settings: Settings
     permission_prompt: PermissionPrompt | None = None
+    ask_user_prompt: AskUserPrompt | None = None
     compact_progress: CompactProgressHandler | None = None
     event_bus: RuntimeEventBus | None = None
     system_prompt_override: str | None = None
@@ -76,6 +80,7 @@ class RuntimeController:
     max_turns: int | None = None
     loop: AgentLoop = field(init=False)
     commands: CommandRegistry = field(init=False)
+    state_store: AppStateStore = field(init=False)
     _sandbox_started: bool = field(default=False, init=False)
     _background_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
@@ -85,6 +90,7 @@ class RuntimeController:
             cwd=self.cwd,
             settings=self.settings,
             permission_prompt=self.permission_prompt,
+            ask_user_prompt=self.ask_user_prompt,
             compact_progress=self.compact_progress,
             event_bus=self.event_bus,
             system_prompt_override=self.system_prompt_override,
@@ -96,6 +102,7 @@ class RuntimeController:
         )
         self.loop.session_id = uuid.uuid4().hex[:12]
         self.commands = self._build_command_registry()
+        self.state_store = AppStateStore(self._build_state())
 
     async def start(self) -> None:
         """Start runtime-owned resources."""
@@ -104,6 +111,7 @@ class RuntimeController:
 
             await start_sandbox(cwd=self.cwd, image=self.settings.sandbox.image)
             self._sandbox_started = True
+        self.sync_state()
 
     async def close(self) -> None:
         """Close runtime-owned resources."""
@@ -190,6 +198,7 @@ class RuntimeController:
             permissions = await self._drain_swarm_permission_requests(print_system)
             if (result.should_save or notification or permissions) and not result.exit:
                 save_loop_snapshot(self.loop)
+            self.sync_state()
             return not result.exit
 
         await run_agent(self.loop, stripped)
@@ -200,6 +209,7 @@ class RuntimeController:
         await self._drain_swarm_permission_requests(print_system)
         save_loop_snapshot(self.loop)
         self._schedule_memory_extraction(print_system)
+        self.sync_state()
         return True
 
     async def _render_command_result(
@@ -216,6 +226,7 @@ class RuntimeController:
             return
         if result.refresh_runtime:
             self.commands = self._build_command_registry()
+            self.sync_state()
         if result.submit_prompt:
             await run_agent(self.loop, result.submit_prompt)
             save_loop_snapshot(self.loop)
@@ -411,6 +422,73 @@ class RuntimeController:
                 pass
         self.loop = new_loop
         self.commands = self._build_command_registry()
+        self.sync_state()
+
+    def sync_state(self) -> AppState:
+        """Refresh and publish the observable runtime state."""
+        return self.state_store.set(**self._build_state().__dict__)
+
+    def _build_state(self) -> AppState:
+        mcp_connected = 0
+        mcp_failed = 0
+        mcp = getattr(self.loop, "_mcp_manager", None)
+        if mcp is not None:
+            try:
+                statuses = mcp.list_statuses()
+                mcp_connected = sum(1 for item in statuses if item.state == "connected")
+                mcp_failed = sum(1 for item in statuses if item.state == "failed")
+            except Exception:
+                mcp_connected = 0
+                mcp_failed = 0
+
+        provider = self.settings.provider.name or "unknown"
+        base_url = self.settings.provider.base_url or ""
+        return AppState(
+            model=self.loop.model,
+            permission_mode=self.loop.permissions.mode,
+            theme="default",
+            cwd=str(self.cwd),
+            session_id=self.loop.session_id or "",
+            provider=provider,
+            base_url=base_url,
+            mcp_connected=mcp_connected,
+            mcp_failed=mcp_failed,
+        )
+
+    def task_snapshots(self) -> list[TaskSnapshot]:
+        """Return UI-safe snapshots for session and background tasks."""
+        snapshots: list[TaskSnapshot] = []
+
+        try:
+            for item in self.loop.task_manager.list_tasks():
+                snapshots.append(TaskSnapshot(
+                    id=item.id,
+                    type="session_task",
+                    status=item.status,
+                    description=item.content,
+                    metadata={},
+                ))
+        except Exception:
+            pass
+
+        try:
+            from miniharness.tasks import get_background_task_manager
+
+            for record in get_background_task_manager().list_tasks():
+                metadata = dict(record.metadata)
+                if record.return_code is not None:
+                    metadata["return_code"] = str(record.return_code)
+                snapshots.append(TaskSnapshot(
+                    id=record.id,
+                    type=record.type,
+                    status=record.status,
+                    description=record.description,
+                    metadata=metadata,
+                ))
+        except Exception:
+            pass
+
+        return snapshots
 
     def _make_context(self) -> CommandContext:
         ctx = CommandContext(
@@ -486,6 +564,7 @@ class RuntimeController:
             self.loop,
             target_id,
             permission_prompt=self.permission_prompt,
+            ask_user_prompt=self.ask_user_prompt,
             compact_progress=self.compact_progress,
             event_bus=self.event_bus,
         )
