@@ -50,6 +50,7 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines.append("  /history            Show message count")
     lines.append("  /tasks              Show current task list")
     lines.append("  /tokens             Show current context token budget")
+    lines.append("  /diff [full|staged|head|path] Show git diff output")
     lines.append("  /model [name]       Show or switch the model")
     lines.append("  /turns [n]          Show or set max turns")
     lines.append("  /permissions [mode] Show / cycle / set permission mode")
@@ -99,6 +100,14 @@ def cmd_tasks(args: str, ctx: CommandContext) -> CommandResult:
     if manager is None:
         return CommandResult.ok("Task manager is not available.")
     return CommandResult.ok(format_task_list(manager.list_tasks()))
+
+
+def cmd_diff(args: str, ctx: CommandContext) -> CommandResult:
+    """Show git diff output."""
+    from miniharness.tools.git_diff import render_diff_command
+
+    result = render_diff_command(ctx.cwd, args)
+    return CommandResult.ok(result.output)
 
 
 def cmd_agents(args: str, ctx: CommandContext) -> CommandResult:

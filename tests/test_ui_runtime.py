@@ -69,6 +69,49 @@ async def test_runtime_tokens_command_reports_budget_without_agent_call(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_runtime_diff_command_uses_shared_git_diff_without_agent_call(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "tracked.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    target.write_text("hello\nworld\n", encoding="utf-8")
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/diff full",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("diff --git" in msg for msg in system_messages)
+    assert any("+world" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
 async def test_runtime_agents_command_lists_agent_definitions(tmp_path: Path):
     runtime = RuntimeController(cwd=tmp_path, settings=Settings())
     system_messages: list[str] = []

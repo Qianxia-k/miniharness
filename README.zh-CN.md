@@ -108,6 +108,7 @@ uv run mh [PROMPT] [OPTIONS]
 /clear                清空会话历史
 /history              显示消息数量
 /project              显示项目指令
+/diff [full|staged]   显示 git diff 输出
 /model                显示或切换模型
 /turns                显示或设置最大循环轮数
 /tokens               显示上下文 token 预算
@@ -140,6 +141,10 @@ read_file       读取文本文件，支持 offset/limit
 ls              列出目录
 grep            字面量文本搜索
 glob            按 glob pattern 匹配文件
+git_status      查看 git root、branch、dirty files 和 diff stats
+git_diff        查看 unstaged、staged 或 HEAD diff 输出
+enter_worktree  创建用于隔离开发的 git worktree
+exit_worktree   按路径删除 git worktree
 lsp             查看 Python symbols、definitions、references、hover
 write_file      创建或覆盖文件
 edit_file       精确字符串替换，并在权限确认时展示 diff preview

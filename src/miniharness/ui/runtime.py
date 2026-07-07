@@ -18,6 +18,7 @@ from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
     cmd_clear,
     cmd_agents,
+    cmd_diff,
     cmd_exit,
     cmd_help,
     cmd_history,
@@ -511,6 +512,7 @@ class RuntimeController:
         reg.register("tasks", cmd_tasks, description="Show current task list", source="builtin")
         reg.register("agents", cmd_agents, description="List or inspect delegated agent definitions", source="builtin")
         reg.register("tokens", cmd_tokens, description="Show current context token budget", source="builtin")
+        reg.register("diff", cmd_diff, description="Show git diff output", source="builtin")
         reg.register("model", cmd_model, description="Show or switch the model", source="builtin")
         reg.register("turns", cmd_turns, description="Show or set max turns", source="builtin")
         reg.register("permissions", cmd_permissions, description="Show or set permission mode", source="builtin")

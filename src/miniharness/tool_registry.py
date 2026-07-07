@@ -22,7 +22,10 @@ from miniharness.tools.background_task import (
 )
 from miniharness.tools.base import BaseTool, ToolPermissionRequest, ToolResult
 from miniharness.tools.bash import BashTool
+from miniharness.tools.git_diff import GitDiffTool
 from miniharness.tools.grep import GrepTool
+from miniharness.tools.git_status import GitStatusTool
+from miniharness.tools.git_worktree import EnterWorktreeTool, ExitWorktreeTool
 from miniharness.tools.glob import GlobTool
 from miniharness.tools.lsp import LspTool
 from miniharness.tools.ls import LsTool
@@ -276,6 +279,8 @@ def create_default_registry(
     registry.register(LsTool(cwd=cwd, permissions=permissions))
     registry.register(GrepTool(cwd=cwd, permissions=permissions))
     registry.register(GlobTool(cwd=cwd, permissions=permissions))
+    registry.register(GitStatusTool(cwd=cwd, permissions=permissions))
+    registry.register(GitDiffTool(cwd=cwd, permissions=permissions))
     registry.register(LspTool(cwd=cwd, permissions=permissions))
     registry.register(SleepTool(cwd=cwd, permissions=permissions))
     registry.register(AskUserQuestionTool(
@@ -287,6 +292,8 @@ def create_default_registry(
     registry.register(WriteFileTool(cwd=cwd, permissions=permissions))
     registry.register(EditFileTool(cwd=cwd, permissions=permissions))
     registry.register(TodoWriteTool(cwd=cwd, permissions=permissions))
+    registry.register(EnterWorktreeTool(cwd=cwd, permissions=permissions))
+    registry.register(ExitWorktreeTool(cwd=cwd, permissions=permissions))
     # Shell
     registry.register(BashTool(cwd=cwd, permissions=permissions))
     # External & meta

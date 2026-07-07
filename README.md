@@ -113,6 +113,7 @@ uv run mh [PROMPT] [OPTIONS]
 /clear                clear conversation history
 /history              show message count
 /project              show project instructions
+/diff [full|staged]   show git diff output
 /model                show or switch model
 /turns                show or set max turns
 /tokens               show context token budget
@@ -145,6 +146,10 @@ read_file       read text files with optional offset/limit
 ls              list directory entries
 grep            search literal text
 glob            match files by glob pattern
+git_status      inspect git root, branch, dirty files, and diff stats
+git_diff        inspect unstaged, staged, or HEAD diff output
+enter_worktree  create a git worktree for isolated coding work
+exit_worktree   remove a git worktree by path
 lsp             inspect Python symbols, definitions, references, and hover text
 write_file      create or overwrite a file
 edit_file       exact-string replacement with permission diff preview

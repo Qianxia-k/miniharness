@@ -21,6 +21,10 @@ def test_default_registry_has_all_tools(tmp_path: Path):
     assert registry.get("ls") is not None
     assert registry.get("grep") is not None
     assert registry.get("glob") is not None
+    assert registry.get("git_status") is not None
+    assert registry.get("git_diff") is not None
+    assert registry.get("enter_worktree") is not None
+    assert registry.get("exit_worktree") is not None
     assert registry.get("lsp") is not None
     assert registry.get("sleep") is not None
     assert registry.get("ask_user_question") is not None
@@ -145,6 +149,8 @@ async def test_write_file_uses_async_permission_prompt(tmp_path: Path):
     assert prompts
     assert prompts[0][0] == "write_file"
     assert "allowed.txt" in prompts[0][1]
+    assert "+ok" in prompts[0][1]
+    assert "(+1 -0)" in prompts[0][1]
 
 
 @pytest.mark.asyncio
@@ -166,6 +172,43 @@ async def test_write_file_async_permission_denial_blocks_write(tmp_path: Path):
     assert result.is_error is True
     assert "User denied" in result.output
     assert not (tmp_path / "denied.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_file_can_refuse_missing_parent_when_requested(tmp_path: Path):
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+
+    result = await registry.execute("write_file", {
+        "path": "missing/child.txt",
+        "content": "nope",
+        "create_directories": False,
+    })
+
+    assert result.is_error is True
+    assert "Parent directory does not exist" in result.output
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_overwriting_binary_file(tmp_path: Path):
+    target = tmp_path / "data.bin"
+    target.write_bytes(b"abc\x00def")
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+
+    result = await registry.execute("write_file", {
+        "path": "data.bin",
+        "content": "text",
+    })
+
+    assert result.is_error is True
+    assert "Binary file" in result.output
+    assert target.read_bytes() == b"abc\x00def"
 
 
 @pytest.mark.asyncio
@@ -238,6 +281,26 @@ async def test_edit_file_permission_prompt_includes_diff(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_edit_file_rejects_binary_files(tmp_path: Path):
+    target = tmp_path / "data.bin"
+    target.write_bytes(b"abc\x00def")
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+
+    result = await registry.execute("edit_file", {
+        "path": "data.bin",
+        "old_str": "abc",
+        "new_str": "xyz",
+    })
+
+    assert result.is_error is True
+    assert "Binary file" in result.output
+    assert target.read_bytes() == b"abc\x00def"
+
+
+@pytest.mark.asyncio
 async def test_glob_lists_matching_files_without_permission_prompt(tmp_path: Path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -259,6 +322,185 @@ async def test_glob_lists_matching_files_without_permission_prompt(tmp_path: Pat
     assert result.is_error is False
     assert result.output == "src/app.py"
     assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_git_status_reports_repository_state_without_permission_prompt(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (tmp_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+    prompts: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append(tool_name)
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("git_status", {
+        "include_diff_stat": True,
+        "max_entries": 10,
+    })
+
+    assert result.is_error is False
+    assert "Repository:" in result.output
+    assert "Branch:" in result.output
+    assert "tracked.txt" in result.output
+    assert "untracked.txt" in result.output
+    assert "Unstaged diff stat:" in result.output
+    assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_git_status_rejects_non_repository(tmp_path: Path):
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+    )
+
+    result = await registry.execute("git_status", {})
+
+    assert result.is_error is True
+    assert "requires a git repository" in result.output
+
+
+@pytest.mark.asyncio
+async def test_git_diff_reports_unstaged_changes_without_permission_prompt(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "tracked.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    target.write_text("hello\nworld\n", encoding="utf-8")
+    prompts: list[str] = []
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        prompts.append(tool_name)
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("git_diff", {
+        "scope": "unstaged",
+        "stat_only": False,
+    })
+
+    assert result.is_error is False
+    assert "diff --git" in result.output
+    assert "+world" in result.output
+    assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_git_diff_rejects_non_repository(tmp_path: Path):
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+    )
+
+    result = await registry.execute("git_diff", {})
+
+    assert result.is_error is True
+    assert "requires a git repository" in result.output
+
+
+@pytest.mark.asyncio
+async def test_enter_worktree_permission_denial_blocks_creation(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    async def permission_prompt(tool_name: str, prompt: str) -> bool:
+        return False
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="default"),
+        permission_prompt=permission_prompt,
+    )
+
+    result = await registry.execute("enter_worktree", {
+        "branch": "feature/demo",
+    })
+
+    assert result.is_error is True
+    assert "User denied" in result.output
+    assert not (tmp_path / ".miniharness" / "worktrees" / "feature-demo").exists()
+
+
+@pytest.mark.asyncio
+async def test_enter_and_exit_worktree_manage_git_worktree(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    registry = create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    )
+
+    create = await registry.execute("enter_worktree", {
+        "branch": "feature/demo",
+    })
+
+    worktree_path = tmp_path / ".miniharness" / "worktrees" / "feature-demo"
+    assert create.is_error is False
+    assert f"Path: {worktree_path}" in create.output
+    assert worktree_path.exists()
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert git_dir.stdout.strip()
+
+    remove = await registry.execute("exit_worktree", {
+        "path": str(worktree_path),
+    })
+
+    assert remove.is_error is False
+    assert not worktree_path.exists()
 
 
 @pytest.mark.asyncio
