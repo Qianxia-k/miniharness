@@ -12,6 +12,7 @@ Commands come from:
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from miniharness.commands.types import CommandContext, CommandHandler, CommandResult
@@ -164,7 +165,35 @@ class CommandRegistry:
             )
 
         try:
-            return handler(args, ctx)
+            result = handler(args, ctx)
+            if inspect.isawaitable(result):
+                return CommandResult.ok(
+                    f"Command /{name} must be run through the async runtime dispatcher."
+                )
+            return result
+        except Exception as exc:
+            return CommandResult.ok(f"Command error: {exc}")
+
+    async def dispatch_async(self, line: str, ctx: CommandContext) -> CommandResult:
+        """Parse and execute a slash command, awaiting async handlers."""
+        if not line.startswith("/"):
+            return CommandResult.ok()
+
+        parts = line[1:].split(maxsplit=1)
+        name = parts[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        handler = self.lookup(name)
+        if handler is None:
+            return CommandResult.ok(
+                f"Unknown command: /{name}. Type /help for available commands."
+            )
+
+        try:
+            result = handler(args, ctx)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         except Exception as exc:
             return CommandResult.ok(f"Command error: {exc}")
 

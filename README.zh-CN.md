@@ -106,9 +106,14 @@ uv run mh [PROMPT] [OPTIONS]
 /help                 显示命令
 /exit, /quit, /q      退出
 /clear                清空会话历史
-/history              显示消息数量
+/status               显示会话状态
+/context              显示当前 runtime system prompt
+/summary [n]          显示消息数量和最近历史
+/compact [n]          压缩较早的会话历史
 /project              显示项目指令
-/diff [full|staged]   显示 git diff 输出
+/branch [show|list]   显示 git branch 信息
+/commit [message]     查看状态或创建 git commit
+/diff [full|staged|head|path] 显示 git diff 输出
 /model                显示或切换模型
 /turns                显示或设置最大循环轮数
 /tokens               显示上下文 token 预算
@@ -268,6 +273,26 @@ agents/          delegated agent definitions
 ```
 
 使用 `/plugins` 查看、启用或禁用 plugin contributions。
+
+Delegated agent definition 可以放在 `.miniharness/agents/<name>.md` 或 plugin
+的 `agents/` 目录中。Frontmatter 可以控制 model、permissions、tools、最大
+turn 数、hooks 和 isolation mode：
+
+```markdown
+---
+name: worker
+description: Implementation worker for scoped code changes.
+permission_mode: accept-edits
+maxTurns: 6
+isolation: worktree
+---
+
+Make focused changes, run relevant checks, and report files changed.
+```
+
+设置 `isolation: worktree` 后，MiniHarness 会在 `.miniharness/worktrees/`
+下创建 git worktree，并让 delegated agent 以该 worktree 作为工作目录启动。
+后台 task metadata 会记录 `isolation`、`worktree_path` 和 `worktree_branch`。
 
 ## 会话、记忆和上下文
 

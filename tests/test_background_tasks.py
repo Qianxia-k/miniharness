@@ -20,6 +20,7 @@ from miniharness.tasks.background import _default_agent_argv
 from miniharness.tasks.worker_protocol import decode_worker_line, encode_worker_message
 from miniharness.tool_registry import create_default_registry
 from miniharness.swarm.registry import BackendRegistry
+from miniharness.swarm.subprocess_backend import SubprocessBackend
 from miniharness.swarm.spawn_utils import (
     build_inherited_env_vars,
     build_teammate_argv,
@@ -229,6 +230,58 @@ def test_backend_registry_rejects_unavailable_explicit_backend():
     assert health["total_count"] == 1
     assert health["backends"]["offline"]["available"] is False
     assert health["backends"]["subprocess"]["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_subprocess_backend_runs_agent_inside_worktree(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manager = reset_background_task_manager_for_tests(
+        BackgroundTaskManager(tasks_dir=tmp_path / "tasks")
+    )
+    reset_agent_registry_for_tests()
+    reset_team_registry_for_tests()
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "import os, sys; sys.stdin.readline(); print('cwd=' + os.getcwd())"
+        )
+    )
+
+    result = await SubprocessBackend().spawn(
+        TeammateSpawnConfig(
+            name="worker",
+            team="default",
+            prompt="work in isolation",
+            description="isolated work",
+            cwd=tmp_path,
+            command=command,
+            isolation="worktree",
+        )
+    )
+
+    assert result.success is True
+    task = await _wait_for_status(manager, result.task_id, "completed")
+    worktree_path = task.metadata.get("worktree_path")
+    assert worktree_path
+    assert task.metadata["isolation"] == "worktree"
+    assert task.cwd == worktree_path
+    assert Path(worktree_path).exists()
+    assert f"cwd={worktree_path}" in manager.read_output(result.task_id)
+
+    statuses = SubprocessBackend().list_agents()
+    assert statuses
+    assert statuses[0].worktree_path == worktree_path
 
 
 def test_worker_protocol_keeps_single_line_plain_and_frames_multiline():
@@ -557,7 +610,7 @@ async def test_team_tools_create_list_and_delete_empty_team(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_team_list_restores_members_from_agent_tasks_and_delete_blocks_nonempty(tmp_path: Path):
+async def test_team_list_restores_members_from_agent_tasks_and_delete_cleans_members(tmp_path: Path):
     manager = reset_background_task_manager_for_tests(
         BackgroundTaskManager(tasks_dir=tmp_path / "tasks")
     )
@@ -593,8 +646,11 @@ async def test_team_list_restores_members_from_agent_tasks_and_delete_blocks_non
     assert f"reviewer@qa task_id={task_id} status=completed" in listed.output
 
     deleted = await registry.execute("team_delete", {"name": "qa"})
-    assert deleted.is_error is True
-    assert "not empty" in deleted.output
+    assert deleted.is_error is False
+    assert "Deleted team qa stopped=1" in deleted.output
+
+    listed_after = await registry.execute("team_list", {})
+    assert listed_after.output == "(no teams)"
 
 
 @pytest.mark.asyncio
@@ -634,6 +690,70 @@ async def test_task_stop_stops_agent_backing_task_and_preserves_agent_history(tm
     listed = await registry.execute("agent_list", {})
     assert f"worker@qa task_id={task_id} status=killed" in listed.output
     assert manager.get_task(task_id).metadata["agent_id"] == "worker@qa"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_backend_shutdown_removes_agent_worktree_and_membership(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manager = reset_background_task_manager_for_tests(
+        BackgroundTaskManager(tasks_dir=tmp_path / "tasks")
+    )
+    reset_agent_registry_for_tests()
+    reset_team_registry_for_tests()
+    script = "\n".join([
+        "import os, sys, time",
+        "print('cwd=' + os.getcwd(), flush=True)",
+        "sys.stdin.readline()",
+        "time.sleep(30)",
+    ])
+    command = f"{shlex.quote(sys.executable)} -u -c " + shlex.quote(script)
+
+    result = await SubprocessBackend().spawn(
+        TeammateSpawnConfig(
+            name="worker",
+            team="qa",
+            prompt="start",
+            description="isolated worker",
+            cwd=tmp_path,
+            command=command,
+            isolation="worktree",
+        )
+    )
+
+    assert result.success is True
+    for _ in range(60):
+        task = manager.get_task(result.task_id)
+        assert task is not None
+        worktree_path = task.metadata.get("worktree_path")
+        if worktree_path and Path(worktree_path).exists():
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worktree was not created")
+
+    assert await SubprocessBackend().shutdown(result.agent_id, force=True) is True
+    task = manager.get_task(result.task_id)
+    assert task is not None
+    assert task.status == "killed"
+    assert task.metadata.get("worktree_cleaned") == "true"
+    assert not Path(worktree_path).exists()
+
+    listed = await create_default_registry(
+        cwd=tmp_path,
+        permissions=PermissionChecker(cwd=tmp_path, mode="bypass"),
+    ).execute("team_list", {})
+    assert listed.output == "qa agents=0"
 
 
 @pytest.mark.asyncio

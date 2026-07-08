@@ -24,6 +24,10 @@ class AgentInput(BaseModel):
     team: str | None = Field(default=None, description="Optional team namespace for the delegated agent")
     model: str | None = Field(default=None, description="Optional model override for the delegated agent")
     command: str | None = Field(default=None, description="Optional custom command for tests or deployments")
+    isolation: str | None = Field(
+        default=None,
+        description="Optional isolation mode override. Supported: worktree",
+    )
 
 
 class AgentListInput(BaseModel):
@@ -104,6 +108,12 @@ class AgentTool(BaseTool):
                 metadata["agent_definition_path"] = agent_def.path
             if agent_def.disallowed_tools:
                 metadata["agent_disallowed_tools"] = ",".join(agent_def.disallowed_tools)
+            if agent_def.isolation:
+                metadata["agent_isolation"] = agent_def.isolation
+
+        isolation = _normalize_isolation(arguments.isolation)
+        if isolation is None and agent_def is not None:
+            isolation = agent_def.isolation
 
         executor = get_backend_registry().get_executor()
         result = await executor.spawn(
@@ -124,6 +134,7 @@ class AgentTool(BaseTool):
                 disallowed_tools=agent_def.disallowed_tools if agent_def is not None else None,
                 permission_mode=agent_def.permission_mode if agent_def is not None else None,
                 hooks=agent_def.hooks if agent_def is not None else None,
+                isolation=isolation,
                 metadata=metadata,
             )
         )
@@ -215,6 +226,18 @@ class AgentListTool(BaseTool):
             lines.append(
                 f"{status.agent_id} task_id={status.task_id} "
                 f"status={status.status}{note} backend={status.backend_type} "
+                f"{_worktree_note(status.worktree_path)}"
                 f"description={status.description}"
             )
         return ToolResult("\n".join(lines))
+
+
+def _normalize_isolation(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    return normalized if normalized in {"worktree"} else None
+
+
+def _worktree_note(worktree_path: str) -> str:
+    return f"worktree={worktree_path} " if worktree_path else ""

@@ -111,9 +111,14 @@ uv run mh [PROMPT] [OPTIONS]
 /help                 show commands
 /exit, /quit, /q      exit
 /clear                clear conversation history
-/history              show message count
+/status               show session status
+/context              show the active runtime system prompt
+/summary [n]          show message count and recent history
+/compact [n]          compact older conversation history
 /project              show project instructions
-/diff [full|staged]   show git diff output
+/branch [show|list]   show git branch information
+/commit [message]     show status or create a git commit
+/diff [full|staged|head|path] show git diff output
 /model                show or switch model
 /turns                show or set max turns
 /tokens               show context token budget
@@ -276,6 +281,27 @@ agents/          delegated agent definitions
 ```
 
 Use `/plugins` to inspect, enable, or disable plugin contributions.
+
+Delegated agent definitions live in `.miniharness/agents/<name>.md` or plugin
+`agents/` directories. Frontmatter can control the model, permissions, tools,
+turn limit, hooks, and isolation mode:
+
+```markdown
+---
+name: worker
+description: Implementation worker for scoped code changes.
+permission_mode: accept-edits
+maxTurns: 6
+isolation: worktree
+---
+
+Make focused changes, run relevant checks, and report files changed.
+```
+
+With `isolation: worktree`, MiniHarness creates a git worktree under
+`.miniharness/worktrees/` and starts the delegated agent with that worktree as
+its working directory. The backing task metadata records `isolation`,
+`worktree_path`, and `worktree_branch`.
 
 ## Sessions, Memory, And Context
 

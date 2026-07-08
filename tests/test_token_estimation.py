@@ -179,6 +179,29 @@ async def test_compiler_records_context_trace_without_compaction():
 
 
 @pytest.mark.asyncio
+async def test_compiler_force_compacts_without_over_budget():
+    budget = ContextBudget(
+        model="gpt-4o-mini",
+        total=100_000,
+        max_tokens=90_000,
+        ratio=0.9,
+        response_reserve_tokens=0,
+    )
+    compiler = ContextCompiler(budget=budget, llm_stream=_never_called_llm)
+    messages = [{"role": "system", "content": "system"}]
+    for index in range(20):
+        messages.append({"role": "user", "content": f"user message {index} " + ("x" * 80)})
+        messages.append({"role": "assistant", "content": f"assistant message {index} " + ("y" * 80)})
+
+    compacted, stats = await compiler.compact_if_needed(messages, force=True)
+
+    assert stats["compacted"] is True
+    assert stats["tier3_session_memory"] is True
+    assert len(compacted) < len(messages)
+    assert "earlier messages condensed" in compacted[1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_compiler_emits_compaction_progress_events():
     events: list[dict] = []
 

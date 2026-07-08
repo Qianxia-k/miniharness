@@ -189,6 +189,7 @@ class ContextCompiler:
             llm_stream=self.llm_stream,
             keep_last_n_turns=self.keep_last_n_turns,
             progress_callback=self.compact_progress,
+            force=force,
         )
         stats.update(compaction_stats)
         stats.update(self.budget.snapshot(msgs))

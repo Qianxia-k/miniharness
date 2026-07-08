@@ -255,6 +255,8 @@ class AgentRegistry:
         """Restore agent routing entries from persisted task metadata."""
         restored = 0
         for task in tasks:
+            if str(task.metadata.get("agent_removed") or "").lower() == "true":
+                continue
             agent_id = str(task.metadata.get("agent_id") or "").strip()
             if not agent_id or agent_id in self._agents:
                 continue

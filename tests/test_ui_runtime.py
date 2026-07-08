@@ -16,6 +16,7 @@ from miniharness.ui.tui import MiniHarnessTUI, PermissionModal
 @pytest.mark.asyncio
 async def test_runtime_slash_command_does_not_call_agent(tmp_path: Path):
     runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    runtime.loop.conversation.append(Message(role="user", content="hello history"))
     system_messages: list[str] = []
     agent_calls: list[str] = []
 
@@ -38,6 +39,7 @@ async def test_runtime_slash_command_does_not_call_agent(tmp_path: Path):
     assert should_continue is True
     assert agent_calls == []
     assert any("Conversation has" in msg for msg in system_messages)
+    assert any("hello history" in msg for msg in system_messages)
 
 
 @pytest.mark.asyncio
@@ -66,6 +68,190 @@ async def test_runtime_tokens_command_reports_budget_without_agent_call(tmp_path
     assert agent_calls == []
     assert any("Context Token Budget" in msg for msg in system_messages)
     assert any("tokenizer:" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_command_reports_session_status_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/status",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("Messages:" in msg for msg in system_messages)
+    assert any("Usage:" in msg for msg in system_messages)
+    assert any("Profile:" in msg for msg in system_messages)
+    assert any("Permission:" in msg for msg in system_messages)
+    assert any(str(tmp_path) in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_command_reports_system_prompt_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/context",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert system_messages
+    assert any("MiniHarness" in msg for msg in system_messages)
+    assert any(str(tmp_path) in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_summary_command_reports_recent_history_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    runtime.loop.conversation.append(Message(role="user", content="first request"))
+    runtime.loop.conversation.append(Message(role="assistant", content="first answer"))
+    long_request = "second request " + ("x" * 350)
+    runtime.loop.conversation.append(Message(role="user", content=long_request))
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/summary 2",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert system_messages
+    assert "Conversation has 4 messages" in system_messages[0]
+    assert "[2] assistant" in system_messages[0]
+    assert "first answer" in system_messages[0]
+    assert "[3] user" in system_messages[0]
+    assert long_request in system_messages[0]
+    assert "first request" not in system_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_runtime_summary_command_rejects_invalid_limit_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/summary nope",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert system_messages == ["Usage: /summary [MAX_MESSAGES]"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_compact_command_compacts_history_without_agent_runner(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    for index in range(20):
+        runtime.loop.conversation.append(Message(role="user", content=f"user {index} " + ("x" * 80)))
+        runtime.loop.conversation.append(Message(role="assistant", content=f"assistant {index} " + ("y" * 80)))
+    before = len(runtime.loop.conversation.messages)
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/compact 6",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert len(runtime.loop.conversation.messages) < before
+    assert any("Compacted conversation from" in msg for msg in system_messages)
+    assert runtime.loop.last_context_stats.get("tier3_session_memory") is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_compact_command_rejects_invalid_limit_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/compact nope",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert system_messages == ["Usage: /compact [PRESERVE_RECENT]"]
 
 
 @pytest.mark.asyncio
@@ -109,6 +295,159 @@ async def test_runtime_diff_command_uses_shared_git_diff_without_agent_call(tmp_
     assert agent_calls == []
     assert any("diff --git" in msg for msg in system_messages)
     assert any("+world" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_branch_command_uses_shared_git_branch_without_agent_call(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "tracked.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/branch",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("Current branch:" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_branch_command_reports_non_git_repo_without_agent_call(tmp_path: Path):
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/branch",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("requires a git repository" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_commit_command_shows_status_without_agent_call(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "tracked.txt"
+    target.write_text("hello\n", encoding="utf-8")
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/commit",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert any("?? tracked.txt" in msg for msg in system_messages)
+
+
+@pytest.mark.asyncio
+async def test_runtime_commit_command_creates_git_commit_without_agent_call(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=tmp_path, check=True)
+    target = tmp_path / "tracked.txt"
+    target.write_text("hello\n", encoding="utf-8")
+
+    runtime = RuntimeController(cwd=tmp_path, settings=Settings())
+    system_messages: list[str] = []
+    agent_calls: list[str] = []
+
+    async def run_agent(loop, prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "should not run"
+
+    async def print_system(message: str) -> None:
+        system_messages.append(message)
+
+    try:
+        should_continue = await runtime.handle_line(
+            "/commit initial commit",
+            run_agent=run_agent,
+            print_system=print_system,
+        )
+    finally:
+        await runtime.close()
+
+    log = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert should_continue is True
+    assert agent_calls == []
+    assert log.stdout.strip() == "initial commit"
+    assert status.stdout.strip() == ""
+    assert any("initial commit" in msg or "files changed" in msg for msg in system_messages)
 
 
 @pytest.mark.asyncio

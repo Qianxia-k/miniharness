@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Awaitable, Protocol
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ class CommandHandler(Protocol):
     and a context object, and returns a ``CommandResult``.
     """
 
-    def __call__(self, args: str, ctx: CommandContext) -> CommandResult: ...
+    def __call__(self, args: str, ctx: CommandContext) -> CommandResult | Awaitable[CommandResult]: ...
 
 
 # ---------------------------------------------------------------------------

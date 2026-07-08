@@ -16,8 +16,12 @@ from typing import Any, Awaitable, Callable
 
 from miniharness.commands import CommandContext, CommandRegistry
 from miniharness.commands.builtin import (
+    cmd_branch,
     cmd_clear,
     cmd_agents,
+    cmd_commit,
+    cmd_compact,
+    cmd_context,
     cmd_diff,
     cmd_exit,
     cmd_help,
@@ -31,6 +35,8 @@ from miniharness.commands.builtin import (
     cmd_plugins,
     cmd_project,
     cmd_skills,
+    cmd_status,
+    cmd_summary,
     cmd_tasks,
     cmd_temperature,
     cmd_tokens,
@@ -179,7 +185,7 @@ class RuntimeController:
             return True
 
         if stripped.startswith("/"):
-            result = self.commands.dispatch(stripped, self._make_context())
+            result = await self.commands.dispatch_async(stripped, self._make_context())
             await self._render_command_result(
                 result,
                 run_agent=run_agent,
@@ -508,10 +514,16 @@ class RuntimeController:
         reg.register("exit", cmd_exit, description="Exit MiniHarness", aliases=["quit", "q"], source="builtin")
         reg.register("clear", cmd_clear, description="Clear conversation history", source="builtin")
         reg.register("help", cmd_help, description="Show available commands", source="builtin")
-        reg.register("history", cmd_history, description="Show message count", source="builtin")
+        reg.register("status", cmd_status, description="Show session status", source="builtin")
+        reg.register("context", cmd_context, description="Show the active runtime system prompt", source="builtin")
+        reg.register("summary", cmd_summary, description="Show message count and recent conversation history", source="builtin")
+        reg.register("compact", cmd_compact, description="Compact older conversation history", source="builtin")
+        reg.register("history", cmd_history, description="Alias for /summary", source="builtin")
         reg.register("tasks", cmd_tasks, description="Show current task list", source="builtin")
         reg.register("agents", cmd_agents, description="List or inspect delegated agent definitions", source="builtin")
         reg.register("tokens", cmd_tokens, description="Show current context token budget", source="builtin")
+        reg.register("branch", cmd_branch, description="Show git branch information", source="builtin")
+        reg.register("commit", cmd_commit, description="Show status or create a git commit", source="builtin")
         reg.register("diff", cmd_diff, description="Show git diff output", source="builtin")
         reg.register("model", cmd_model, description="Show or switch the model", source="builtin")
         reg.register("turns", cmd_turns, description="Show or set max turns", source="builtin")

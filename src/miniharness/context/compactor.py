@@ -204,6 +204,7 @@ def session_memory_compact_messages(
     keep_recent: int = _SESSION_MEMORY_KEEP_RECENT,
     max_lines: int = _SESSION_MEMORY_MAX_LINES,
     max_chars: int = _SESSION_MEMORY_MAX_CHARS,
+    force: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Produce a one-line-per-message summary of older messages.
 
@@ -244,7 +245,7 @@ def session_memory_compact_messages(
     # Estimate whether this actually saves tokens.
     old_tokens = sum(_rough_token_count(m.get("content", "") or "") for m in old)
     new_tokens = _rough_token_count(summary_text)
-    if new_tokens >= old_tokens:
+    if new_tokens >= old_tokens and not force:
         return messages, {
             "session_memory_summarised": False,
             "session_memory_lines": 0,
@@ -500,6 +501,7 @@ async def auto_compact_if_needed(
     llm_stream=None,
     keep_last_n_turns: int = 3,
     progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    force: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run progressive compaction, stopping when the budget is satisfied.
 
@@ -543,7 +545,7 @@ async def auto_compact_if_needed(
     await emit("start")
 
     # ---- Tier 1: Microcompact ---------------------------------------------
-    if budget.is_over_budget(messages, tools=tools):
+    if force or budget.is_over_budget(messages, tools=tools):
         await emit("tier_start", tier="microcompact")
         messages, t1_stats = microcompact_messages(messages)
         if t1_stats.get("microcompact_cleared", 0) > 0:
@@ -553,7 +555,7 @@ async def auto_compact_if_needed(
         await emit("tier_end", tier="microcompact", **t1_stats)
 
     # ---- Tier 2: Context Collapse -----------------------------------------
-    if budget.is_over_budget(messages, tools=tools):
+    if force or budget.is_over_budget(messages, tools=tools):
         await emit("tier_start", tier="context_collapse")
         messages, t2_stats = context_collapse_messages(messages)
         if t2_stats.get("context_collapse_blocks", 0) > 0:
@@ -563,9 +565,13 @@ async def auto_compact_if_needed(
         await emit("tier_end", tier="context_collapse", **t2_stats)
 
     # ---- Tier 3: Session Memory -------------------------------------------
-    if budget.is_over_budget(messages, tools=tools):
+    if force or budget.is_over_budget(messages, tools=tools):
         await emit("tier_start", tier="session_memory")
-        messages, t3_stats = session_memory_compact_messages(messages)
+        messages, t3_stats = session_memory_compact_messages(
+            messages,
+            keep_recent=keep_last_n_turns * 2,
+            force=force,
+        )
         if t3_stats.get("session_memory_summarised"):
             stats["tier3_session_memory"] = True
             stats["compacted"] = True

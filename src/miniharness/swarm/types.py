@@ -40,6 +40,8 @@ class TeammateSpawnConfig:
     permission_mode: str | None = None
     hooks: dict | None = None
     permissions: list[str] | None = None
+    isolation: str | None = None
+    worktree_path: str | None = None
     metadata: dict[str, str] | None = None
 
 
@@ -77,6 +79,7 @@ class TeammateStatus:
     backend_type: str
     description: str
     status_note: str = ""
+    worktree_path: str = ""
 
 
 class TeammateExecutor(Protocol):

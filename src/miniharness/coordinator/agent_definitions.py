@@ -22,6 +22,8 @@ from miniharness.skills._frontmatter import parse_bool, parse_skill_frontmatter
 
 AgentSource = Literal["builtin", "user", "project", "plugin"]
 SystemPromptMode = Literal["append", "replace"]
+IsolationMode = Literal["worktree", "remote"]
+ISOLATION_MODES: tuple[str, ...] = ("worktree", "remote")
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class AgentDefinition:
     hooks: dict[str, Any] | None = None
     background: bool = False
     initial_prompt: str | None = None
+    isolation: IsolationMode | None = None
     subagent_type: str | None = None
     source: AgentSource = "builtin"
     path: str | None = None
@@ -188,6 +191,7 @@ def load_agents_dir(directory: Path, *, source: AgentSource = "user") -> list[Ag
                 initial_prompt=_string(
                     fm.get("initial_prompt", fm.get("initialPrompt"))
                 ) or None,
+                isolation=_parse_isolation(fm.get("isolation")),
                 subagent_type=_string(fm.get("subagent_type")) or name,
                 source=source,
                 path=str(path),
@@ -318,3 +322,10 @@ def _parse_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _parse_isolation(value: Any) -> IsolationMode | None:
+    text = _string(value)
+    if text in ISOLATION_MODES:
+        return text  # type: ignore[return-value]
+    return None

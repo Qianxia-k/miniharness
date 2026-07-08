@@ -23,6 +23,7 @@ from miniharness.swarm.spawn_utils import (
     encode_agent_permission_mode_env,
     encode_agent_tool_policy_env,
 )
+from miniharness.swarm.worktree import WorktreeManager, worktree_slug_for_agent
 
 
 class SubprocessBackend:
@@ -45,8 +46,31 @@ class SubprocessBackend:
         )
         teams.ensure_team(team)
         task_description = f"{agent_name}: {config.description.strip()}"
+        working_cwd = config.cwd
+        worktree_path = config.worktree_path
+        worktree_info = None
+        if (config.isolation or "").strip() == "worktree":
+            try:
+                worktree_info = await WorktreeManager().create_worktree(
+                    repo_path=config.cwd,
+                    slug=worktree_slug_for_agent(
+                        agent_id=agent_id,
+                        description=config.description,
+                    ),
+                    agent_id=agent_id,
+                )
+            except Exception as exc:
+                return SpawnResult(
+                    task_id="",
+                    agent_id=agent_id,
+                    backend_type=self.backend_type,
+                    success=False,
+                    error=str(exc),
+                )
+            working_cwd = worktree_info.path
+            worktree_path = str(worktree_info.path)
         argv = None if config.command is not None else build_teammate_argv(
-            cwd=config.cwd,
+            cwd=working_cwd,
             model=config.model,
             system_prompt=config.system_prompt,
             system_prompt_mode=config.system_prompt_mode,
@@ -68,7 +92,7 @@ class SubprocessBackend:
             task = await manager.create_agent_task(
                 prompt=config.prompt,
                 description=task_description,
-                cwd=config.cwd,
+                cwd=working_cwd,
                 model=config.model,
                 command=config.command,
                 argv=argv,
@@ -76,6 +100,11 @@ class SubprocessBackend:
                 extra_env=extra_env,
             )
         except Exception as exc:
+            if worktree_info is not None:
+                try:
+                    await WorktreeManager().remove_worktree(worktree_info.path)
+                except Exception:
+                    pass
             return SpawnResult(
                 task_id="",
                 agent_id=agent_id,
@@ -83,6 +112,11 @@ class SubprocessBackend:
                 success=False,
                 error=str(exc),
             )
+        if worktree_info is not None:
+            task.metadata["isolation"] = "worktree"
+            task.metadata["worktree_path"] = str(worktree_info.path)
+            task.metadata["worktree_branch"] = worktree_info.branch
+            task.metadata["worktree_original_path"] = str(worktree_info.original_path)
 
         agents.register(
             agent_id=agent_id,
@@ -98,6 +132,8 @@ class SubprocessBackend:
             "team": team,
             "backend_type": self.backend_type,
             "agent_description": config.description.strip(),
+            **({"isolation": config.isolation} if config.isolation else {}),
+            **({"worktree_path": worktree_path} if worktree_path else {}),
             **(config.metadata or {}),
         })
         teams.add_agent(team, agent_id)
@@ -119,10 +155,30 @@ class SubprocessBackend:
         task_id = self.get_task_id(agent_id)
         if task_id is None:
             return False
+        manager = get_background_task_manager()
+        task = manager.get_task(task_id)
         try:
-            await get_background_task_manager().stop_task(task_id)
+            await manager.stop_task(task_id)
         except ValueError:
             return False
+        if task is None:
+            task = manager.get_task(task_id)
+        if task is not None:
+            await _cleanup_task_worktree(task)
+        agents = get_agent_registry()
+        teams = get_team_registry()
+        teams.load(team_store_path(manager.tasks_dir))
+        removed = agents.remove(agent_id) or agents.remove(task_id)
+        if removed is not None:
+            teams.remove_agent_everywhere(removed.agent_id)
+            teams.save(team_store_path(manager.tasks_dir))
+        try:
+            manager.update_task_metadata(task_id, {
+                "agent_removed": "true",
+                "agent_removed_reason": "shutdown",
+            })
+        except Exception:
+            pass
         return True
 
     def get_task_id(self, agent_id: str) -> str | None:
@@ -157,6 +213,22 @@ class SubprocessBackend:
                     backend_type=record.backend_type,
                     description=record.description,
                     status_note=task.metadata.get("status_note", "") if task is not None else "",
+                    worktree_path=task.metadata.get("worktree_path", "") if task is not None else "",
                 )
             )
         return statuses
+
+
+async def _cleanup_task_worktree(task) -> None:
+    worktree_path = (task.metadata or {}).get("worktree_path")
+    if not worktree_path:
+        return
+    try:
+        await WorktreeManager().remove_worktree(worktree_path)
+    except Exception:
+        return
+    try:
+        manager = get_background_task_manager()
+        manager.update_task_metadata(task.id, {"worktree_cleaned": "true"})
+    except Exception:
+        pass

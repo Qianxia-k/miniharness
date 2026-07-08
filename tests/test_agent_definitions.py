@@ -41,6 +41,7 @@ description: Reviews code changes carefully.
 model: inherit
 disallowed_tools: write_file, edit_file
 permission_mode: plan
+isolation: worktree
 maxTurns: 3
 initialPrompt: Always inspect the diff before answering.
 hooks:
@@ -63,6 +64,7 @@ You are a careful reviewer. Inspect diffs and report risks.
     assert agent.model == "inherit"
     assert agent.disallowed_tools == ["write_file", "edit_file"]
     assert agent.permission_mode == "plan"
+    assert agent.isolation == "worktree"
     assert agent.max_turns == 3
     assert agent.initial_prompt == "Always inspect the diff before answering."
     assert agent.hooks == {

@@ -10,6 +10,7 @@ from miniharness.tasks import (
     get_team_registry,
     team_store_path,
 )
+from miniharness.swarm.registry import get_backend_registry
 from miniharness.tools.base import BaseTool, ToolResult
 
 
@@ -53,10 +54,10 @@ class TeamCreateTool(BaseTool):
 
 
 class TeamDeleteTool(BaseTool):
-    """Delete an empty lightweight team."""
+    """Delete a delegated-agent team and clean up its members."""
 
     name = "team_delete"
-    description = "Delete an empty lightweight delegated-agent team."
+    description = "Delete a delegated-agent team, stopping its members and cleaning up worktrees."
     input_model = TeamDeleteInput
 
     async def execute(self, arguments: TeamDeleteInput) -> ToolResult:
@@ -71,17 +72,28 @@ class TeamDeleteTool(BaseTool):
         team = teams.get_team(arguments.name)
         if team is None:
             return ToolResult(f"Team '{arguments.name.strip()}' does not exist", is_error=True)
-        if team.agents:
+        stopped: list[str] = []
+        failed: list[str] = []
+        executor = get_backend_registry().get_executor()
+        for agent_id in list(team.agents):
+            ok = await executor.shutdown(agent_id, force=True)
+            if ok:
+                stopped.append(agent_id)
+            else:
+                failed.append(agent_id)
+        if failed:
             return ToolResult(
-                f"Team '{team.name}' is not empty; stop or move agents before deleting it.",
+                f"Could not stop team members before deleting {team.name}: {', '.join(failed)}",
                 is_error=True,
             )
+        teams.load(path)
         try:
             teams.delete_team(arguments.name)
         except ValueError as exc:
             return ToolResult(str(exc), is_error=True)
         teams.save(path)
-        return ToolResult(f"Deleted team {team.name}")
+        suffix = f" stopped={len(stopped)}" if stopped else ""
+        return ToolResult(f"Deleted team {team.name}{suffix}")
 
 
 class TeamListTool(BaseTool):

@@ -47,9 +47,14 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
     lines = ["**Commands**", ""]
     lines.append("  /exit, /quit, /q    Exit MiniHarness")
     lines.append("  /clear              Clear conversation history")
-    lines.append("  /history            Show message count")
+    lines.append("  /status             Show session status")
+    lines.append("  /context            Show the active runtime system prompt")
+    lines.append("  /summary [n]        Show message count and recent conversation history")
+    lines.append("  /compact [n]        Compact older conversation history")
     lines.append("  /tasks              Show current task list")
     lines.append("  /tokens             Show current context token budget")
+    lines.append("  /branch [show|list] Show git branch information")
+    lines.append("  /commit [message]   Show status or create a git commit")
     lines.append("  /diff [full|staged|head|path] Show git diff output")
     lines.append("  /model [name]       Show or switch the model")
     lines.append("  /turns [n]          Show or set max turns")
@@ -87,9 +92,185 @@ def cmd_help(args: str, ctx: CommandContext) -> CommandResult:
 
 
 def cmd_history(args: str, ctx: CommandContext) -> CommandResult:
-    """Show message count."""
-    count = len(ctx.loop.conversation.messages)
-    return CommandResult.ok(f"Conversation has {count} messages (including system prompt).")
+    """Compatibility alias for /summary."""
+    return cmd_summary(args, ctx)
+
+
+def cmd_status(args: str, ctx: CommandContext) -> CommandResult:
+    """Show session status."""
+    del args
+
+    tools = []
+    if ctx.tool_registry is not None:
+        try:
+            tools = ctx.tool_registry.to_openai_tools()
+        except Exception:
+            tools = []
+    try:
+        budget = ctx.loop.budget.snapshot(ctx.loop.conversation.to_openai(), tools=tools)
+        usage = (
+            f"estimated={_fmt_int(budget.get('token_count'))} "
+            f"soft_limit={_fmt_int(budget.get('soft_limit'))} "
+            f"({float(budget.get('usage_ratio') or 0.0):.1%})"
+        )
+    except Exception:
+        usage = "estimated=0 soft_limit=0 (0.0%)"
+
+    provider = getattr(getattr(ctx.loop, "settings", None), "provider", None)
+    profile = getattr(provider, "name", "") or "unknown"
+    session_id = getattr(ctx.loop, "session_id", None) or "(unsaved)"
+    permission_mode = getattr(getattr(ctx.loop, "permissions", None), "mode", "unknown")
+    lines = [
+        f"Messages: {len(ctx.loop.conversation.messages)}",
+        f"Usage: {usage}",
+        f"Profile: {profile}",
+        f"Model: {ctx.loop.model}",
+        f"Session: {session_id}",
+        f"Cwd: {ctx.cwd}",
+        f"Permission: {permission_mode}",
+        f"Turns: {ctx.loop.max_turns}",
+        f"Tools: {len(tools)}",
+    ]
+    return CommandResult.ok("\n".join(lines))
+
+
+def cmd_context(args: str, ctx: CommandContext) -> CommandResult:
+    """Show the active runtime system prompt."""
+    del args
+    try:
+        prompt = ctx.loop._build_system_prompt(user_query="")
+    except Exception:
+        prompt = ""
+        if ctx.loop.conversation.messages and ctx.loop.conversation.messages[0].role == "system":
+            prompt = ctx.loop.conversation.messages[0].content
+    return CommandResult.ok(prompt or "(empty system prompt)")
+
+
+def cmd_summary(args: str, ctx: CommandContext) -> CommandResult:
+    """Show message count and recent conversation history."""
+    max_messages = 8
+    if args:
+        try:
+            max_messages = max(1, int(args.strip()))
+        except ValueError:
+            return CommandResult.ok("Usage: /summary [MAX_MESSAGES]")
+
+    messages = ctx.loop.conversation.to_openai()
+    visible = [message for message in messages if message.get("role") != "system"]
+    selected = visible[-max_messages:]
+    lines = [
+        f"Conversation has {len(messages)} messages "
+        f"({len(visible)} non-system).",
+        f"Showing last {len(selected)} non-system message(s).",
+    ]
+    if not selected:
+        lines.append("No conversation content to show.")
+        return CommandResult.ok("\n".join(lines))
+
+    start_index = len(visible) - len(selected) + 1
+    for offset, message in enumerate(selected):
+        role = str(message.get("role") or "unknown")
+        content = _render_history_message(message)
+        lines.extend([
+            "",
+            f"[{start_index + offset}] {role}",
+            content or "(empty)",
+        ])
+    return CommandResult.ok("\n".join(lines))
+
+
+def _render_history_message(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        text = "\n".join(parts)
+    elif content is None:
+        text = ""
+    else:
+        text = str(content)
+
+    tool_calls = message.get("tool_calls") or []
+    if tool_calls:
+        rendered_calls = []
+        for call in tool_calls:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            name = function.get("name", "?")
+            arguments = function.get("arguments", "{}")
+            rendered_calls.append(f"- {name}({arguments})")
+        block = "tool calls:\n" + "\n".join(rendered_calls)
+        text = f"{text}\n{block}".strip() if text else block
+    return text
+
+
+async def cmd_compact(args: str, ctx: CommandContext) -> CommandResult:
+    """Compact older conversation history."""
+    preserve_recent = 6
+    if args:
+        try:
+            preserve_recent = max(1, int(args.strip()))
+        except ValueError:
+            return CommandResult.ok("Usage: /compact [PRESERVE_RECENT]")
+
+    from miniharness.context.carryover import build_compact_attachments
+    from miniharness.hooks import HookEvent
+
+    before = len(ctx.loop.conversation.messages)
+    messages = ctx.loop.conversation.to_openai()
+    tools = ctx.tool_registry.to_openai_tools() if ctx.tool_registry is not None else []
+    tokens_before = ctx.loop.budget.tokens_used(messages, tools=tools)
+
+    hook_result = await ctx.loop._fire_hook(HookEvent.PRE_COMPACT, {
+        "trigger": "manual",
+        "message_count": before,
+        "tokens_used": tokens_before,
+        "session_id": ctx.loop.session_id or "",
+    })
+    if hook_result.blocked:
+        return CommandResult.ok(f"Hook blocked compact: {hook_result.reason}")
+
+    original_keep = ctx.loop.compiler.keep_last_n_turns
+    ctx.loop.compiler.keep_last_n_turns = max(1, preserve_recent // 2)
+    try:
+        compacted, stats = await ctx.loop.compiler.compact_if_needed(
+            messages,
+            attachments=build_compact_attachments(ctx.loop.tool_metadata),
+            force=True,
+        )
+    finally:
+        ctx.loop.compiler.keep_last_n_turns = original_keep
+
+    ctx.loop._replace_conversation(compacted)
+    ctx.loop.last_context_stats = dict(stats)
+
+    tiers_run = [
+        name for name in [
+            "tier1_microcompact",
+            "tier2_context_collapse",
+            "tier3_session_memory",
+            "tier4_full_llm_compact",
+        ]
+        if stats.get(name)
+    ]
+    await ctx.loop._fire_hook(HookEvent.POST_COMPACT, {
+        "trigger": "manual",
+        "tiers_run": tiers_run,
+        "messages_before": before,
+        "messages_after": len(ctx.loop.conversation.messages),
+        "session_id": ctx.loop.session_id or "",
+    })
+
+    return CommandResult.ok(
+        f"Compacted conversation from {before} messages to "
+        f"{len(ctx.loop.conversation.messages)}.",
+        should_save=True,
+    )
 
 
 def cmd_tasks(args: str, ctx: CommandContext) -> CommandResult:
@@ -108,6 +289,62 @@ def cmd_diff(args: str, ctx: CommandContext) -> CommandResult:
 
     result = render_diff_command(ctx.cwd, args)
     return CommandResult.ok(result.output)
+
+
+def cmd_branch(args: str, ctx: CommandContext) -> CommandResult:
+    """Show git branch information."""
+    from miniharness.tools.git_utils import command_output, repo_root, run_git
+
+    action = args.strip() or "show"
+    root = repo_root(ctx.cwd)
+    if root is None:
+        return CommandResult.ok("branch requires a git repository")
+
+    if action == "show":
+        result = run_git(root, "branch", "--show-current")
+        output = command_output(result)
+        if result.returncode != 0:
+            return CommandResult.ok(output)
+        return CommandResult.ok(f"Current branch: {output or '(detached HEAD)'}")
+
+    if action == "list":
+        result = run_git(root, "branch", "--format", "%(refname:short)")
+        output = command_output(result)
+        return CommandResult.ok(output if result.returncode == 0 and output else output or "(no branches)")
+
+    return CommandResult.ok("Usage: /branch [show|list]")
+
+
+def cmd_commit(args: str, ctx: CommandContext) -> CommandResult:
+    """Show status or create a git commit."""
+    from miniharness.tools.git_utils import command_output, repo_root, run_git
+
+    root = repo_root(ctx.cwd)
+    if root is None:
+        return CommandResult.ok("commit requires a git repository")
+
+    message = args.strip()
+    if not message:
+        status = run_git(root, "status", "--short")
+        output = command_output(status)
+        if status.returncode != 0:
+            return CommandResult.ok(output)
+        return CommandResult.ok(output if output else "(working tree clean)")
+
+    status = run_git(root, "status", "--short")
+    status_output = command_output(status)
+    if status.returncode != 0:
+        return CommandResult.ok(status_output)
+    if not status_output.strip():
+        return CommandResult.ok("Nothing to commit.")
+
+    add = run_git(root, "add", "-A")
+    add_output = command_output(add)
+    if add.returncode != 0:
+        return CommandResult.ok(add_output)
+
+    commit = run_git(root, "commit", "-m", message)
+    return CommandResult.ok(command_output(commit))
 
 
 def cmd_agents(args: str, ctx: CommandContext) -> CommandResult:
@@ -129,6 +366,7 @@ def cmd_agents(args: str, ctx: CommandContext) -> CommandResult:
             f"  model: {agent.model or 'default'}",
             f"  system_prompt_mode: {agent.system_prompt_mode}",
             f"  permission_mode: {agent.permission_mode or '(default)'}",
+            f"  isolation: {agent.isolation or '(none)'}",
             f"  max_turns: {agent.max_turns or '(default)'}",
             f"  initial_prompt: {'yes' if agent.initial_prompt else 'no'}",
             f"  disallowed_tools: {', '.join(agent.disallowed_tools) if agent.disallowed_tools else '(none)'}",
